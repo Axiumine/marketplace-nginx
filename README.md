@@ -8,7 +8,7 @@ panels had no checked-in vhost at all, which is the documentation asymmetry reco
 ones.
 
 It lives in the workspace root rather than in any one repo because it is the one artefact that is not
-per-repo: a single nginx instance fronts twelve processes across five of the fifteen repos, all three
+per-repo: a single nginx instance fronts eleven loopback upstreams across five of the fifteen repos, all three
 vhosts share the upstream table and the rate-limit zones, and the same `logout` service answers on all
 three hosts. Split across repos, no copy is ever the whole configuration.
 
@@ -89,7 +89,7 @@ then a second lock on the same door, and the only one a config review can see.
 |`sites-available/admin.marketplace-domain.com.conf`|—|operator vhost: SPA, 4 endpoints|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
 |`test/suite.sh`|—|`nginx -t` plus 150 behavioural assertions; runs *inside* the container|
-|`test/fake-backends.conf`|—|stand-ins for the twelve upstreams, test-only, never installed|
+|`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
 
 `conf.d/*` must be included at `http` level — `proxy_cache_path`, `limit_req_zone`, `map` and `upstream`
 are not valid inside a `server` block. On Debian, `/etc/nginx/conf.d/*.conf` is already included from
@@ -114,7 +114,7 @@ on it today beyond readability.
 |`/logout`|`marketplace-dev-authenticated-logout`|4030|✅|✅|✅|
 |`/check/verify-email-user/`|`marketplace-dev-public-resource`|4027|✅|—|—|
 |`/check/verify-email/`|`marketplace-dev-public-resource`|4027|—|✅|—|
-|`/api/*`, `/`|`marketplace-user` SSR|3045|✅|—|—|
+|`/` (everything else)|`marketplace-user` SSR|3045|✅|—|—|
 |`/geocode/`|Nominatim|8080|✅|—|—|
 
 **The path IS the service.** Each one serves its GraphQL at exactly that path — `ENDPOINT` in its
@@ -191,7 +191,7 @@ way to find out whether a directive works is to install the configuration somewh
 |server hardening|`Server:` carries no version on any host; the two token endpoints are **not** compressed while `/assets/` is, checked against a body large enough for the difference to mean something|
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
-|rate limits|each login zone lets the burst through and then returns 429|
+|rate limits|all three login zones — customer, shop owner, operator — let the burst through and then return 429, each out of its own budget|
 
 The rate-limit group runs **last, after a full nginx restart**, and every other endpoint is probed
 exactly once. `limit_req` counters live in shared memory: they survive a reload, and a suite that spent
@@ -231,6 +231,15 @@ knowing; neither is visible to `nginx -t` and neither is visible by reading the 
    recipe kept in a comment for a CA that still answers.
 5. `sub_filter_types text/html;` is `[warn] duplicate MIME type "text/html"` — `text/html` is already in
    the default set and restating it is not free. Removed; the reasoning stayed as a comment.
+6. `location = /api/register` and `location /api/` proxied to the SSR process under a dedicated 5r/m
+   `mkt_register` zone, documented as verifying Turnstile server-side before forwarding to the
+   `userRegister` mutation. **No `/api/*` route has ever existed in `marketplace-user/src/routes/`**, so
+   both blocks matched paths the renderer answers with a 404 and the zone metered nothing. Deleted rather
+   than built: the Turnstile secret is already server-side in `marketplace-dev-public-resource` and always
+   was, and registration is already limited there by `guardPublicWrite` — two Redis counters per hour, per
+   IP *and per email address*, the second of which no `$binary_remote_addr` zone can express. Building the
+   route would have pushed plaintext passwords through a second process to weaken both controls. The apex
+   vhost and `conf.d/20-rate-limit.conf` each carry the reasoning where the block used to be.
 
 Two smaller hardening gaps were closed at the same time, both of which the suite now guards: the
 `Server:` header advertised the exact nginx version, and the four authorization endpoints compressed a

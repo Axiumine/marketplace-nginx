@@ -210,8 +210,10 @@ probe POST marketplace-domain.com /user-authenticated-resource
 assert_body 'BACKEND:mkt_user_resource' 'apex  /user-authenticated-resource   → mkt_user_resource'
 probe GET marketplace-domain.com /check/verify-email-user/a@b.c/deadbeef
 assert_body 'BACKEND:mkt_public_resource' 'apex  /check/verify-email-user/     → mkt_public_resource'
+# No `/api/` location exists any more, so this must fall through to the SSR catch-all like any
+# other unknown path — not to a location of its own. See the comment in the apex vhost.
 probe POST marketplace-domain.com /api/register
-assert_body 'BACKEND:mkt_user_ssr' 'apex  /api/register                 → mkt_user_ssr'
+assert_body 'BACKEND:mkt_user_ssr' 'apex  /api/register  → mkt_user_ssr via the catch-all, no /api/ location'
 probe GET marketplace-domain.com /health
 assert_body 'BACKEND:mkt_user_ssr' 'apex  /health                       → mkt_user_ssr'
 probe GET marketplace-domain.com /geocode/search
@@ -453,7 +455,18 @@ burst_probe() {   # HOST PATH COUNT LABEL
 
 burst_probe admin.marketplace-domain.com     /public-authorization 12 'operator login  (mkt_admin_auth 10r/m)'
 burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 20r/m)'
-burst_probe marketplace-domain.com           /api/register          8 'registration    (mkt_register 5r/m)'
+# The customer surface's own login zone. The two probes above are on the panel hostnames and spend
+# `mkt_owner_auth` / `mkt_admin_auth`; `mkt_auth` is a third, separate budget reached only through
+# the apex — which is the whole point of giving the three logins zones of their own, since they all
+# land on the same service (public-authorization, 4028).
+burst_probe marketplace-domain.com           /public-authorization 24 'customer login  (mkt_auth 20r/m)'
+
+# ⚠️ There is deliberately no registration burst test, because there is no `mkt_register` zone to
+# test and no `/api/register` to aim one at. Registration is a GraphQL POST to /public-resource like
+# every other public write, bounded at the edge by `mkt_public` and properly metered inside
+# marketplace-dev-public-resource by `guardPublicWrite` — two Redis counters per hour, per IP *and*
+# per email address. The per-email half is what actually stops a mail-bomb and no nginx zone keyed
+# on $binary_remote_addr can express it. See the comments in 20-rate-limit.conf and the apex vhost.
 
 echo
 echo '==================================================================='
