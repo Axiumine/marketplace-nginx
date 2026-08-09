@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs INSIDE the container. Do not run this on a host — it writes to /etc/nginx and starts a
-# server. `nginx/test/run.sh` is the entry point.
+# server. `marketplace-nginx/test/run.sh` is the entry point.
 #
 # Two halves:
 #   1. `nginx -t` against the real configuration, with throwaway certificates so the
