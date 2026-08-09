@@ -4,7 +4,7 @@ The production edge for all three domains, in one place. **This repo is authorit
 `marketplace-user/docs/nginx/` held the customer vhost alone and is now a pointer at this folder — its
 four `.conf` files are deleted, not copied, so there is one edge configuration and not two. The two
 panels had no checked-in vhost at all, which is the documentation asymmetry recorded as §3.7g of
-`docs/report/token-handling-security-audit.md` — the two higher-privilege surfaces were the undocumented
+[`docs/report/token-handling-security-audit.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/report/token-handling-security-audit.md) — the two higher-privilege surfaces were the undocumented
 ones.
 
 It is a repo of its own, checked out at the workspace root, because it is the one artefact that is not
