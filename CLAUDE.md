@@ -3,17 +3,16 @@
 The platform edge: one nginx, three vhosts, TLS terminating here and nowhere else, in front of the
 eleven loopback processes. the one way to execute any of it is the throwaway container in `test/` or your local setup.
 
-**Read parent first** — `../CLAUDE.md`
-(<https://github.com/Axiumine/fullstack-marketplace-blueprint> if you are reading this on GitHub).
+**Read parent first** — [`../CLAUDE.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/CLAUDE.md)
 
 | Need | File |
 |---|---|
-| what every file holds, the host → path → service → port matrix, install, env assumptions | `README.md` |
-| the suite, its eleven assertion groups, and six real defects it caught | `README.md` §Testing it, before it reaches a host |
-| seven nginx traps written out at length | `README.md` §Things that are easy to get wrong |
-| what is deliberately not built here | `README.md` §Known gaps |
-| why the `Secure` flag is rewritten at the edge at all | `README.md` §⚠️ The `Secure` cookie flag lives here |
-| why the edge is a repo of its own, and the port table | `../docs/architecture.md` §nginx |
+| what every file holds, the host → path → service → port matrix, install, env assumptions | [`README.md`](./README.md) |
+| the suite, its eleven assertion groups, and six real defects it caught | [`README.md`](./README.md) §Testing it, before it reaches a host |
+| seven nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
+| what is deliberately not built here | [`README.md`](./README.md) §Known gaps |
+| why the `Secure` flag is rewritten at the edge at all | [`README.md`](./README.md) §⚠️ The `Secure` cookie flag lives here |
+| why the edge is a repo of its own, and the port table | [`../docs/architecture.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/architecture.md) §nginx |
 
 ## Running it
 
