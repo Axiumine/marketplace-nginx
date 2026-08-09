@@ -38,8 +38,10 @@ Three hosts, not one, and the split is load-bearing in four places:
 3. **Rate limiting.** All three logins hit the same process on 4028. The edge is the only layer that
    still knows which hostname was asked for, so it is the only place a stuffing run against operator
    accounts can be stopped from spending the customers' allowance.
-4. **Header policy.** The customer surface needs a CSP loose enough for MapLibre and Turnstile; the
-   panels need neither and get a strictly tighter one.
+4. **Header policy.** The customer surface needs a CSP loose enough for MapLibre and a nonce for its
+   server-rendered inline script; the panels need neither and get a strictly tighter one. Both
+   policies allow `challenges.cloudflare.com` in `script-src` and `frame-src` — all three login
+   pages render Turnstile.
 
 ## ⚠️ The `Secure` cookie flag lives here
 
@@ -83,12 +85,12 @@ then a second lock on the same door, and the only one a config review can see.
 |`conf.d/40-tls.conf`|http|protocols, ciphers, session cache, and the `444` default server|
 |`snippets/proxy-backend.conf`|server|**the `Secure` rewrite**, keepalive, forwarded headers, timeouts|
 |`snippets/security-headers-public.conf`|server/location|customer CSP + headers (nonce, MapLibre, Turnstile)|
-|`snippets/security-headers-private.conf`|server/location|panel CSP + headers — strictly tighter, no nonce|
+|`snippets/security-headers-private.conf`|server/location|panel CSP + headers — strictly tighter, no nonce, no MapLibre, Turnstile allowed|
 |`sites-available/marketplace-domain.com.conf`|—|customer vhost: SSR, cache, static, 5 endpoints, geocoder|
 |`sites-available/shopowner.marketplace-domain.com.conf`|—|shop-owner vhost: SPA, 4 endpoints, `/check/verify-email/`|
 |`sites-available/admin.marketplace-domain.com.conf`|—|operator vhost: SPA, 4 endpoints|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
-|`test/suite.sh`|—|`nginx -t` plus 150 behavioural assertions; runs *inside* the container|
+|`test/suite.sh`|—|`nginx -t` plus 168 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
 
 `conf.d/*` must be included at `http` level — `proxy_cache_path`, `limit_req_zone`, `map` and `upstream`

@@ -293,13 +293,23 @@ check_headers() {   # HOST PATH LABEL PRIVATE?
 	# the whole header is discarded. One CSP line in the dump means one header, unfolded.
 	_n=$(grep -ci '^content-security-policy:' "$HDR")
 	[ "$_n" = 1 ] && pass "$3 — CSP is a single unfolded header" || fail "$3 — CSP appears $_n times (folded value?)"
+	# Turnstile is on all three login pages. Both directives are needed and for different reasons:
+	# the API script is fetched from that origin, and the challenge itself renders in an iframe
+	# served by it. Missing either shows an empty box and no console error worth reading, and the
+	# form then submits with no token — which fails closed only where TURNSTILE_SECRET is set, so a
+	# developer box never reveals it.
+	assert_header content-security-policy 'frame-src https://challenges.cloudflare.com' "$3 — Turnstile in frame-src"
 	if [ "${4:-}" = private ]; then
+		assert_header content-security-policy "script-src 'self' https://challenges.cloudflare.com" \
+			"$3 — Turnstile in script-src"
 		header content-security-policy | grep -q "nonce-" &&
 			fail "$3 — panel CSP must not carry a nonce" ||
 			pass "$3 — panel CSP carries no nonce (no inline script to sign)"
 		assert_header referrer-policy 'no-referrer' "$3 — Referrer-Policy"
 		assert_header x-robots-tag    'noindex'     "$3 — X-Robots-Tag"
 	else
+		assert_header content-security-policy "'strict-dynamic' https://challenges.cloudflare.com" \
+			"$3 — Turnstile in script-src"
 		header content-security-policy | grep -qE "'nonce-[0-9a-f]{32}'" &&
 			pass "$3 — customer CSP carries a 32-hex nonce" ||
 			fail "$3 — customer CSP nonce missing or malformed"
