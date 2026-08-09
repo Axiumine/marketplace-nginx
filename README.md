@@ -1,16 +1,20 @@
 # nginx — the platform edge
 
-The production edge for all three domains, in one place. **This directory is authoritative.**
+The production edge for all three domains, in one place. **This repo is authoritative.**
 `marketplace-user/docs/nginx/` held the customer vhost alone and is now a pointer at this folder — its
 four `.conf` files are deleted, not copied, so there is one edge configuration and not two. The two
 panels had no checked-in vhost at all, which is the documentation asymmetry recorded as §3.7g of
 `docs/report/token-handling-security-audit.md` — the two higher-privilege surfaces were the undocumented
 ones.
 
-It lives in the workspace root rather than in any one repo because it is the one artefact that is not
-per-repo: a single nginx instance fronts eleven loopback upstreams across five of the fifteen repos, all three
-vhosts share the upstream table and the rate-limit zones, and the same `logout` service answers on all
-three hosts. Split across repos, no copy is ever the whole configuration.
+It is a repo of its own, checked out at the workspace root, because it is the one artefact that is not
+per-service: a single nginx instance fronts eleven loopback upstreams across five of the sixteen repos,
+all three vhosts share the upstream table and the rate-limit zones, and the same `logout` service answers
+on all three hosts. Split across the service repos, no copy is ever the whole configuration.
+
+⚠️ **This repo has no `package.json` and no `.githooks/`** — no lint, no coverage, no Qodana, and **not
+the secret guard either**. It is the one repo on the platform where a committed credential is caught by
+nothing. There is none today; keep it that way by hand.
 
 **No nginx exists in this workspace or on this development machine** — there is no `/etc/nginx` and no
 nginx binary in `PATH`. These files describe the production edge. Nothing here has been run.
@@ -68,9 +72,9 @@ over plain HTTP. Keygrip's constant-time signature stops an attacker who wants t
 does nothing against one who *reads* it in cleartext; `SameSite=Strict` constrains which sites may send
 it, not which networks may observe it. That is §3.1 🔴 Critical of the token-handling audit, and this
 directory closes it — **as long as nginx is actually in front.** Nothing else on the platform sets the
-flag, nothing fails without it, and no test in any of the fifteen repos covers it.
+flag, nothing fails without it, and no test in any of the sixteen repos covers it.
 
-`secure: true` in koa-utils remains the real fix (it is the sixteenth repo, outside this workspace, and
+`secure: true` in koa-utils remains the real fix (it is the seventeenth repo, outside this workspace, and
 not bridged by `deploy-local.sh` the way `marketplace-common` is). When it lands, this line stays: it is
 then a second lock on the same door, and the only one a config review can see.
 
