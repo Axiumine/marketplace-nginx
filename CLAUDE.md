@@ -1,10 +1,9 @@
 # marketplace-nginx
 
 The platform edge: one nginx, three vhosts, TLS terminating here and nowhere else, in front of the
-eleven loopback processes. Configuration only — no `package.json`, no application code, and **no nginx
-installed on this machine**, so the one way to execute any of it is the throwaway container in `test/`.
+eleven loopback processes. the one way to execute any of it is the throwaway container in `test/` or your local setup.
 
-**Read parent first** — `/media/nvme/websites/fullstack-marketplace-blueprint/CLAUDE.md`
+**Read parent first** — `../CLAUDE.md`
 (<https://github.com/Axiumine/fullstack-marketplace-blueprint> if you are reading this on GitHub).
 
 | Need | File |
