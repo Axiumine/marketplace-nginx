@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# pre-push — the only gate this repo has.
+#
+# marketplace-nginx carries no package.json, so there is no lint, no type check,
+# no coverage, no mutation score and no Qodana project here: nothing for any of
+# them to run on. What it does have is test/run.sh, and that suite is the only
+# way to learn whether this configuration is correct at all — no nginx is
+# installed on this machine, so a broken vhost stays invisible until a reload
+# fails on a host where a failed reload is an outage.
+#
+# One blocking gate:
+#   [1/1] test/run.sh — `nginx -t` against the real files with throwaway
+#         certificates, then the behavioural half: a live nginx, stand-in
+#         backends, and assertions against what actually comes out of the
+#         socket. The second half is the one that caught a
+#         Content-Security-Policy header being silently dropped while
+#         `nginx -t` stayed perfectly happy.
+#
+# ⚠️ Not scoped by path, deliberately, and there is nothing here to scope it by:
+# every file in this repo is part of the one configuration the suite exercises.
+# A push also carries merge commits and anything committed with --no-verify,
+# which no pre-commit hook ever sees — and this repo has none at all, so every
+# revision that reaches the remote passes through this hook or through nothing.
+#
+# ⚠️ This repo has no package.json, so nothing restores `core.hooksPath` after a
+# clone. The fourteen sub-repos that are packages each carry a `prepare` script
+# that does it on `yarn install`; here it is a manual
+# `git config core.hooksPath .githooks`, or this hook is off and the push is
+# ungated with no output to say so.
+#
+# ⚠️ This hook does not guard secrets. There is no pre-commit hook in this repo
+# and so no check 0 — a credential committed here is caught by nothing. There is
+# no credential in this repo today; keeping it that way is a manual job. See
+# ../.claude/SECRETS.md.
+#
+# No bypass variable, by design — the suite takes well under a minute and needs
+# nothing but a container engine. `git push --no-verify` is the escape hatch and
+# it is meant to be conspicuous.
+
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+RUNNER="$ROOT/test/run.sh"
+
+# $1 = what is wrong, $2… = the command(s) that fix it.
+#
+# A missing prerequisite blocks; it never warns and continues. A gate that steps
+# aside when it cannot run is not a gate — and this repo has exactly one, so
+# there is nothing behind it to catch what it lets through.
+gate_block() {
+	local reason="$1"
+	shift
+	{
+		echo
+		echo "pre-push: BLOCKED — $reason"
+		echo
+		echo 'Fix it with:'
+		echo
+		printf '    %s\n' "$@"
+		echo
+	} >&2
+	exit 1
+}
+
+if [ ! -f "$RUNNER" ]; then
+	gate_block 'test/run.sh is missing from the worktree — nothing to gate, which is not a pass.' \
+		'git checkout test/run.sh'
+fi
+
+# Checked separately from existence because the failure it causes is silent in
+# the wrong direction: this hook invokes the runner directly, so a 100644 copy
+# fails as a permission error that reads like a broken test suite. The mode is
+# tracked by git (100755), so a clone restores it — a local chmod is the way it
+# gets lost.
+if [ ! -x "$RUNNER" ]; then
+	gate_block 'test/run.sh is not executable — the run would fail as a permission error and be reported as a failed check.' \
+		'chmod +x test/run.sh' \
+		'git update-index --chmod=+x test/run.sh'
+fi
+
+# Both defaults are read out of run.sh rather than repeated here, so changing
+# the engine or the image in one place cannot leave this hook checking for a
+# prerequisite the suite will not use. The env vars are the same two run.sh
+# honours, so `NGINX_TEST_IMAGE=nginx:1.29-alpine git push` checks and tests the
+# same image.
+ENGINE_DEFAULT="$(sed -n 's/.*CONTAINER_ENGINE:-\([^}]*\)}.*/\1/p' "$RUNNER" | head -n 1)"
+IMAGE_DEFAULT="$(sed -n 's/.*NGINX_TEST_IMAGE:-\([^}]*\)}.*/\1/p' "$RUNNER" | head -n 1)"
+
+if [ -z "$ENGINE_DEFAULT" ] || [ -z "$IMAGE_DEFAULT" ]; then
+	gate_block 'could not read the CONTAINER_ENGINE / NGINX_TEST_IMAGE defaults out of test/run.sh — its parameter expansions have changed shape, and this hook would check prerequisites the suite does not use.' \
+		'git checkout test/run.sh' \
+		'# or update the two sed lines in .githooks/pre-push to match'
+fi
+
+ENGINE="${CONTAINER_ENGINE:-$ENGINE_DEFAULT}"
+IMAGE="${NGINX_TEST_IMAGE:-$IMAGE_DEFAULT}"
+
+if ! command -v "$ENGINE" > /dev/null 2>&1; then
+	gate_block "$ENGINE not found in PATH — the whole suite runs inside a container, and nothing on this machine can stand in for it (there is no nginx here either)." \
+		'# install Docker Engine, then push again:' \
+		'https://docs.docker.com/engine/install/' \
+		'# or, with podman already installed:' \
+		'CONTAINER_ENGINE=podman git push'
+fi
+
+if ! "$ENGINE" info > /dev/null 2>&1; then
+	gate_block "$ENGINE is installed but not reachable — the daemon is down, or this user is not in its group." \
+		"sudo systemctl start $ENGINE" \
+		"# and, if it is a permission error: sudo usermod -aG $ENGINE \$USER && newgrp $ENGINE"
+fi
+
+# The runner would pull this itself. Blocking instead keeps a slow or
+# unreachable registry from turning into a failed push: one explicit pull per
+# image bump, versus a network flake on any push.
+if ! "$ENGINE" image inspect "$IMAGE" > /dev/null 2>&1; then
+	gate_block "test image $IMAGE is not present locally." \
+		"$ENGINE pull $IMAGE"
+fi
+
+echo "pre-push [1/1]: marketplace-nginx — validating and testing the edge configuration against $IMAGE…"
+
+if ! "$RUNNER"; then
+	cat >&2 << 'MSG'
+
+────────────────────────────────────────────────────────────────────────────
+PUSH BLOCKED — the edge configuration failed its own suite.
+
+Read the FIRST failure above, not the last: the run is `nginx -t` before any
+behavioural check, so a syntax error stops it before a single request is made
+and every later assertion is simply absent rather than passing.
+
+Nothing here needs live infrastructure. Certificates are generated inside the
+container and every upstream is a stub, so a red run is a real defect in
+conf.d/, snippets/ or sites-available/ — never a missing service, never a
+machine that is not set up. The one external dependency is the container image
+itself, and this hook has already proved it is present.
+
+Two failures worth recognising on sight:
+
+  1. A header the snippets declare not arriving at the client. nginx's
+     add_header does not merge — a single add_header in an inner block drops
+     every one inherited from outside it. `nginx -t` is happy either way, which
+     is the exact bug this suite was written for.
+
+  2. A burst probe failing while the vhost looks right. The three login zones
+     (mkt_auth, mkt_owner_auth, mkt_admin_auth) are separate budgets that all
+     land on the same service; pointing two hostnames at one zone passes
+     `nginx -t` and silently halves the limit for both.
+
+Run it by hand for the whole picture:  ./test/run.sh
+Check a version bump before rolling it out:
+    NGINX_TEST_IMAGE=nginx:1.29-alpine ./test/run.sh
+
+⚠️ Minimum nginx 1.25.1. Below that `http2 on` is not a directive, and below
+1.19.4 `proxy_cookie_flags` does not exist — the cookie rewrite is the entire
+point of this configuration, so an older image does not warn, it ships the
+session cookie unflagged.
+
+Fix the configuration, or add the assertion that should have caught it. Never
+delete a check to make the push go through.
+────────────────────────────────────────────────────────────────────────────
+MSG
+	exit 1
+fi
+
+echo 'pre-push [1/1]: edge configuration validated and all checks passed. Pushing.'
+exit 0
