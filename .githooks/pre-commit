@@ -8,10 +8,9 @@
 #   1. staged PATH looks like a secret file            -> block
 #   2. staged ADDED LINES contain a high-entropy secret -> block
 #
-# Patterns are deliberately narrow enough that the committed `env` / `npmrc`
-# placeholder templates pass, and a line that is a self-declared placeholder
-# (`KEY=test-…`) is dropped before the value scan. Override a verified false
-# positive with:
+# Patterns are deliberately narrow, and a line that is a self-declared
+# placeholder (`KEY=test-…`) is dropped before the value scan. Override a
+# verified false positive with:
 #   git commit --no-verify
 set -uo pipefail
 
@@ -74,45 +73,50 @@ if [ "$env_shape_fail" -ne 0 ]; then
 	exit 1
 fi
 
-SECRET_PATH='(^|/)(\.env(\..*)?|\.envrc|\.npmrc|\.yarnrc(\.yml)?|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials\.json|service-account.*\.json)$|\.(pem|p12|pfx|jks)$'
+# Credential-bearing filenames, trimmed to what can land in this repo: no npm, yarn,
+# direnv, Postgres or GCP tooling here, so `.npmrc`, `.yarnrc`, `.envrc`, `.pgpass`,
+# `credentials.json`, `service-account*.json` and `jks` are gone. `key` is added —
+# `ssl_certificate_key` names a `.key` file at least as often as a `.pem` one, and this
+# is the one repo on the platform where that file would plausibly be created.
+SECRET_PATH='(^|/)(\.env(\..*)?|\.netrc|id_rsa|id_dsa|id_ecdsa|id_ed25519)$|\.(pem|key|p12|pfx)$'
 
-# Vendored secret-scanner rulesets legitimately contain example secret patterns.
-SKIP_PATH='(^|/)(semgrep/vendor|gitleaks|trufflehog|\.gitnexus)/'
-
-# High-entropy formats only. A placeholder (npm_xxxx, all-x, ${VAR}, empty) must
-# never match, or the guard gets disabled by the first false positive.
-SECRET_VALUE='npm_[A-Za-z0-9]{36}'
-SECRET_VALUE+='|_authToken[[:space:]]*=[[:space:]]*["'"'"']?([0-9a-f]{8}-[0-9a-f]{4}-|ey[A-Za-z0-9_-]{10,}\.)'
-SECRET_VALUE+='|-----BEGIN [A-Z ]*PRIVATE KEY-----'
-SECRET_VALUE+='|KEYGRIP_KEY_[12][[:space:]]*=[[:space:]]*"[^x"]{40}'
-# dotenv style: KEY=<16+ chars>, at line start (a leading + from the diff is stripped first)
-SECRET_VALUE+='|^[[:space:]]*(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|INTROSPECTION_CODE|NPM_TOKEN)=[^$x[:space:]][^[:space:]]{15,}'
-# code style: KEY = "<16+ chars>" — a quoted literal, never process.env.KEY
-SECRET_VALUE+='|(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|INTROSPECTION_CODE|NPM_TOKEN)[[:space:]]*[:=][[:space:]]*["'"'"'][^$x"'"'"'][^"'"'"']{15,}["'"'"']'
+# High-entropy formats only. A placeholder (all-x, ${VAR}, empty) must never
+# match, or the guard gets disabled by the first false positive.
+#
+# Narrower than the other five variants of this hook. This repo tracks nginx
+# configuration and a shell test harness — no package.json, no env file, no
+# JavaScript — so their npm, `.npmrc`, `KEYGRIP_KEY_*` and service-env-key
+# branches can never fire here. Only formats that can plausibly land in a conf,
+# a snippet or the README are scanned. A `.pem` / `.p12` arriving as a *file* is
+# caught by SECRET_PATH above; this catches a key pasted inline instead.
+SECRET_VALUE='-----BEGIN [A-Z ]*PRIVATE KEY-----'
 SECRET_VALUE+='|mongodb(\+srv)?://[^:/[:space:]]+:[^@[:space:]]{10,}@'
-# credential URL: `https://<userinfo>@host`, which is the shape of a Sentry/Bugsink DSN.
-# `DSN` cannot join the key list above — the committed `env` template assigns one there, so a
-# key-name rule would block the template itself. What separates the two is the userinfo: the
+# credential URL: `https://<userinfo>@host` — the shape of a Sentry/Bugsink DSN and of a
+# tokenised registry URL. What separates a real one from a placeholder is the userinfo: the
 # placeholder is 14 `x`, a real key is 32+ hex. Hence first-char-not-x plus a 20-char floor.
 SECRET_VALUE+='|https://[^$x:@/[:space:]"][^:@/[:space:]"]{19,}@'
 
 # Declared-placeholder lines, dropped before the value scan: a whole line whose *only*
-# content is `KEY=test-…` / `KEY: 'test-…'` (test fixtures in vitest.config.mts and friends).
+# content is `KEY=test-…` / `KEY: 'test-…'` (a self-declared placeholder in a conf or a doc).
 # Anchored at both ends on purpose — it can never whitelist a secret that merely appears
 # somewhere inside a URI, an object literal or a longer expression, only a line that is
 # itself a self-declared placeholder assignment.
 PLACEHOLDER='^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*[[:space:]]*[:=][[:space:]]*'
 PLACEHOLDER+='["'"'"']?(test|dummy|fake|sample|example|placeholder|changeme|your[-_])[A-Za-z_0-9:/.-]*["'"'"']?,?[[:space:]]*$'
 
-# The `|| true` below absorbs grep's no-match exit 1 — it must not also absorb git's. A failed
-# `git diff` yields an empty list, and an empty list is exactly what "nothing staged" looks like:
-# the two loops would then scan nothing and the commit would pass by having read no files at all.
-# So git's status is taken on its own line, before grep can hide it.
+# git's status is taken on its own line, never folded into a pipeline that could hide it. A
+# failed `git diff` yields an empty list, and an empty list is exactly what "nothing staged"
+# looks like: the two loops would then scan nothing and the commit would pass by having read
+# no files at all.
+#
+# The other five variants filter this list through a SKIP_PATH allowlist for vendored
+# secret-scanner rulesets (semgrep, gitleaks, trufflehog), which legitimately carry example
+# secret patterns. None of those exist here, so the list is scanned whole.
 if ! all_staged="$(git diff --cached --name-only --diff-filter=ACMR)"; then
 	echo 'pre-commit: `git diff --cached` failed — refusing to commit rather than scan nothing.' >&2
 	exit 1
 fi
-staged=$(printf '%s\n' "$all_staged" | grep -Ev "$SKIP_PATH" || true)
+staged="$all_staged"
 
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
