@@ -8,7 +8,7 @@ eleven loopback processes. the one way to execute any of it is the throwaway con
 | Need | File |
 |---|---|
 | what every file holds, the host → path → service → port matrix, install, env assumptions | [`README.md`](./README.md) |
-| the suite, its eleven assertion groups, and six real defects it caught | [`README.md`](./README.md) §Testing it, before it reaches a host |
+| the suite and its assertion groups | [`README.md`](./README.md) §Testing it, before it reaches a host |
 | seven nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
 | what is deliberately not built here | [`README.md`](./README.md) §Known gaps |
 | why the `Secure` flag is rewritten at the edge at all | [`README.md`](./README.md) §⚠️ The `Secure` cookie flag lives here |
@@ -17,7 +17,7 @@ eleven loopback processes. the one way to execute any of it is the throwaway con
 ## Running it
 
 ```bash
-./test/run.sh                                       # nginx -t, then 168 assertions in a container
+./test/run.sh                                       # nginx -t, then the assertion suite in a container
 CONTAINER_ENGINE=podman ./test/run.sh               # podman instead of docker
 NGINX_TEST_IMAGE=nginx:1.29-alpine ./test/run.sh    # check a version bump before rollout
 ```
@@ -38,8 +38,7 @@ common way a CSP silently disappears from exactly one route.
 
 ⚠️ **Both CSP lines must stay on one physical line.** nginx has no backslash continuation inside a
 quoted string: a `\` before a newline becomes a literal LF in the value, header validation fails, and
-that one header is dropped silently while every other `add_header` in the file still ships. A readable
-multi-line version once shipped unexecuted in `marketplace-user/docs/nginx/` and nobody noticed.
+that one header is dropped silently while every other `add_header` in the file still ships.
 
 ⚠️ **`proxy_cookie_flags ~ secure httponly samesite=strict;` is the only thing on the platform that
 sets `Secure` on the session cookie** — koa-utils ships `secure: false` with a comment saying to
@@ -73,10 +72,9 @@ hydrates, with nothing in the console.
 - **Every zone keys on `$binary_remote_addr`.** Behind a CDN or a second proxy that becomes the proxy's
   own address and all visitors share one bucket, until `set_real_ip_from` plus a `$realip`-derived key
   are configured.
-- **No `/api/register` location and no `mkt_register` zone, deliberately.** The old pair matched a
-  route the app never had and counted nothing; the real limit is `guardPublicWrite` in
-  `marketplace-dev-public-resource`, per-IP *and* per-email, which no nginx zone can express. The
-  27-line comment where it used to live says so. Do not rebuild it.
+- **No `/api/register` location and no `mkt_register` zone, deliberately.** The app has no such route,
+  and the real limit is `guardPublicWrite` in `marketplace-dev-public-resource`, per-IP *and*
+  per-email, which no nginx zone can express. Do not add one.
 - **The suite proves configuration, never application behaviour.** All eleven upstreams are canned
   nginx stubs, and the four authorization stubs mint cookies exactly the way koa-utils does today
   (`secure: false`, no `SameSite`) — so anything the suite reports as flagged was flagged by nginx.
@@ -85,16 +83,37 @@ hydrates, with nothing in the console.
 
 ## Gates
 
-Two hooks, neither shaped like any other repo's (ADR-030), because this one has no `package.json`.
+Three hooks. `commit-msg` is byte-identical across all sixteen repos; the other two are shaped like no
+other repo's (ADR-030), because this one has no `package.json`.
+
+**`.githooks/commit-msg`** enforces `<type>(<scope>): <subject>` — `feat|fix|chore|docs|refactor|ci`,
+optionally prefixed `🤖 ` — with a 150-char subject and a body of at most 10 lines, wrapped at 150.
+`Merge `/`Revert ` subjects skip the format check. ⚠️ **`Co-Authored-By` is banned anywhere in the
+message and that check runs first, so even a merge commit is rejected for it.** Every check reads
+`CLEAN`, never `$1`: git has not stripped the file yet, so the raw one still holds the `#` template and,
+under `commit.verbose` / `git commit -v`, the whole staged diff below the `>8` scissors line. **Any new
+check must read `CLEAN` too** — scanning the raw file rejects good messages for what the diff contains.
+Blank lines, `Key: value` trailers and whitespace-free lines (URLs, identifiers) are further exempt from
+the body limits.
 
 **`.githooks/pre-push`** runs `test/run.sh` and blocks the push on any failure. It also blocks rather
 than skips when `test/run.sh` is missing or not executable, when the container engine is absent or its
 daemon unreachable, or when the test image is not already present locally. There is no bypass variable.
 
 **`.githooks/pre-commit`** is the platform's secret guard — check 0 plus the two staged-secret scans —
-and stops there, with no gate after it. ⚠️ **Its body is byte-identical to the other fifteen copies and
-must stay that way**: a fix to any one of the six variants is copied to the other five, and only the
-header comment above the body differs per repo.
+and stops there, with no gate after it. ⚠️ **Its pattern variables diverge from the other fifteen
+copies', deliberately** — this repo has no `package.json`, no env file and no JavaScript:
+
+- `SECRET_VALUE` keeps three branches — inline private key, MongoDB URL, credential URL. The npm,
+  `.npmrc`, `KEYGRIP_KEY_*` and service-env-key branches are dropped.
+- `SECRET_PATH` drops `.envrc`, `.npmrc`, `.yarnrc`, `.pgpass`, `credentials.json`,
+  `service-account*.json` and `jks`, and **adds `key`** — `ssl_certificate_key` names a `.key` file at
+  least as often as a `.pem` one, and this is the one repo where that file would plausibly be created.
+- `SKIP_PATH` is gone. It allowlisted vendored semgrep / gitleaks / trufflehog rulesets, none of which
+  exist here, so the staged list is scanned whole.
+
+Everything else in the body is still shared, so **a fix to any other variant is merged in by hand here,
+never copied over wholesale.**
 
 ⚠️ **The hook is not self-arming.** This repo has no `package.json`, so no `prepare` script sets
 `core.hooksPath`. Once, by hand, after a fresh clone:
