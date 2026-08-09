@@ -19,8 +19,9 @@
 # ⚠️ Not scoped by path, deliberately, and there is nothing here to scope it by:
 # every file in this repo is part of the one configuration the suite exercises.
 # A push also carries merge commits and anything committed with --no-verify,
-# which no pre-commit hook ever sees — and this repo has none at all, so every
-# revision that reaches the remote passes through this hook or through nothing.
+# which no pre-commit hook ever sees — and the pre-commit beside this file is the
+# secret guard only, so this hook is the sole place the configuration itself is
+# ever checked before it reaches the remote.
 #
 # ⚠️ This repo has no package.json, so nothing restores `core.hooksPath` after a
 # clone. The fourteen sub-repos that are packages each carry a `prepare` script
@@ -28,10 +29,9 @@
 # `git config core.hooksPath .githooks`, or this hook is off and the push is
 # ungated with no output to say so.
 #
-# ⚠️ This hook does not guard secrets. There is no pre-commit hook in this repo
-# and so no check 0 — a credential committed here is caught by nothing. There is
-# no credential in this repo today; keeping it that way is a manual job. See
-# ../.claude/SECRETS.md.
+# ⚠️ This hook does not guard secrets, and does not need to: .githooks/pre-commit
+# carries check 0 and both staged-secret scans, byte-identical to the other
+# fifteen repos' copies. See ../.claude/SECRETS.md.
 #
 # No bypass variable, by design — the suite takes well under a minute and needs
 # nothing but a container engine. `git push --no-verify` is the escape hatch and

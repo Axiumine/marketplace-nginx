@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# pre-commit — refuse to commit secret files or live secret values.
+#
+# Installed as a per-repo copy (not a symlink: nothing else can move out from
+# under it). Three independent checks — check 0 reads the working tree,
+# checks 1-2 the staged index:
+#   0. a working-tree env value is split across two lines -> block
+#   1. staged PATH looks like a secret file            -> block
+#   2. staged ADDED LINES contain a high-entropy secret -> block
+#
+# Patterns are deliberately narrow enough that the committed `env` / `npmrc`
+# placeholder templates pass, and a line that is a self-declared placeholder
+# (`KEY=test-…`) is dropped before the value scan. Override a verified false
+# positive with:
+#   git commit --no-verify
+set -uo pipefail
+
+fail=0
+
+# ---------------------------------------------------------------------------
+# Check 0 — an env value broken across two physical lines.
+#
+# dotenv ends a value at the newline *even inside quotes*, hands back the
+# truncated prefix, and then parses the orphan tail — a bare fragment with no
+# `KEY=` on it — as its own variable named after its first token. Both halves
+# are silent: the service boots, its own suite stays green, and only a peer
+# service that must agree on the value ever notices. On 2026-08-09 all five
+# `.env` files holding `KEYGRIP_KEY_1`/`_2` were broken this way, 88-char keys
+# wrapped after 76, one file carrying the tail twice.
+#
+# Quoting does not prevent it — every one of those values was correctly quoted
+# — so the "quote anything with whitespace" convention (RISK_REGISTER R05) is
+# not enough and this runs as a gate instead. R05b.
+#
+# It reads the working tree, not the index, because the file it most needs to
+# see is git-ignored and never staged. Line numbers and key names only: no
+# value is ever printed, per .claude/SECRETS.md.
+#
+# A deliberate multi-line value (a PEM body, say) would trip this. None exists
+# on this platform; if one is ever added, `git commit --no-verify`.
+# ---------------------------------------------------------------------------
+env_shape_ok() {
+	local f="$1" n=0 line trimmed val q bad=0
+	while IFS= read -r line || [ -n "$line" ]; do
+		n=$((n + 1))
+		trimmed="${line#"${line%%[![:space:]]*}"}"
+		case "$trimmed" in '' | '#'*) continue ;; esac
+		if [[ ! $trimmed =~ ^[A-Za-z_][A-Za-z_0-9]*= ]]; then
+			echo "pre-commit: $f:$n is not a KEY=VALUE line — the value above it is cut in two." >&2
+			bad=1
+			continue
+		fi
+		val="${trimmed#*=}"
+		q="${val:0:1}"
+		if [ "$q" = '"' ] || [ "$q" = "'" ]; then
+			if [ "${#val}" -lt 2 ] || [ "${val: -1}" != "$q" ]; then
+				echo "pre-commit: $f:$n — ${trimmed%%=*} opens a $q quote that never closes on this line." >&2
+				bad=1
+			fi
+		fi
+	done < "$f"
+	return "$bad"
+}
+
+env_shape_fail=0
+for envfile in .env .env.* env; do
+	[ -f "$envfile" ] || continue
+	env_shape_ok "$envfile" || env_shape_fail=1
+done
+if [ "$env_shape_fail" -ne 0 ]; then
+	echo 'pre-commit: aborted — an env value is split across two lines. dotenv silently truncates it and turns the' >&2
+	echo '            orphan tail into a junk variable. Rejoin the value onto one line; no value was printed here.' >&2
+	echo '            Why this is a gate and not a convention: docs/workflow.md §Environment files, R05b.' >&2
+	exit 1
+fi
+
+SECRET_PATH='(^|/)(\.env(\..*)?|\.envrc|\.npmrc|\.yarnrc(\.yml)?|\.netrc|\.pgpass|id_rsa|id_dsa|id_ecdsa|id_ed25519|credentials\.json|service-account.*\.json)$|\.(pem|p12|pfx|jks)$'
+
+# Vendored secret-scanner rulesets legitimately contain example secret patterns.
+SKIP_PATH='(^|/)(semgrep/vendor|gitleaks|trufflehog|\.gitnexus)/'
+
+# High-entropy formats only. A placeholder (npm_xxxx, all-x, ${VAR}, empty) must
+# never match, or the guard gets disabled by the first false positive.
+SECRET_VALUE='npm_[A-Za-z0-9]{36}'
+SECRET_VALUE+='|_authToken[[:space:]]*=[[:space:]]*["'"'"']?([0-9a-f]{8}-[0-9a-f]{4}-|ey[A-Za-z0-9_-]{10,}\.)'
+SECRET_VALUE+='|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+SECRET_VALUE+='|KEYGRIP_KEY_[12][[:space:]]*=[[:space:]]*"[^x"]{40}'
+# dotenv style: KEY=<16+ chars>, at line start (a leading + from the diff is stripped first)
+SECRET_VALUE+='|^[[:space:]]*(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|INTROSPECTION_CODE|NPM_TOKEN)=[^$x[:space:]][^[:space:]]{15,}'
+# code style: KEY = "<16+ chars>" — a quoted literal, never process.env.KEY
+SECRET_VALUE+='|(QODANA_TOKEN|SOCKETLABS_SERVER_APIKEY|SOCKETLABS_SERVER_ID|REDIS_PASSWORD|INTROSPECTION_CODE|NPM_TOKEN)[[:space:]]*[:=][[:space:]]*["'"'"'][^$x"'"'"'][^"'"'"']{15,}["'"'"']'
+SECRET_VALUE+='|mongodb(\+srv)?://[^:/[:space:]]+:[^@[:space:]]{10,}@'
+# credential URL: `https://<userinfo>@host`, which is the shape of a Sentry/Bugsink DSN.
+# `DSN` cannot join the key list above — the committed `env` template assigns one there, so a
+# key-name rule would block the template itself. What separates the two is the userinfo: the
+# placeholder is 14 `x`, a real key is 32+ hex. Hence first-char-not-x plus a 20-char floor.
+SECRET_VALUE+='|https://[^$x:@/[:space:]"][^:@/[:space:]"]{19,}@'
+
+# Declared-placeholder lines, dropped before the value scan: a whole line whose *only*
+# content is `KEY=test-…` / `KEY: 'test-…'` (test fixtures in vitest.config.mts and friends).
+# Anchored at both ends on purpose — it can never whitelist a secret that merely appears
+# somewhere inside a URI, an object literal or a longer expression, only a line that is
+# itself a self-declared placeholder assignment.
+PLACEHOLDER='^[[:space:]]*[A-Za-z_][A-Za-z_0-9]*[[:space:]]*[:=][[:space:]]*'
+PLACEHOLDER+='["'"'"']?(test|dummy|fake|sample|example|placeholder|changeme|your[-_])[A-Za-z_0-9:/.-]*["'"'"']?,?[[:space:]]*$'
+
+# The `|| true` below absorbs grep's no-match exit 1 — it must not also absorb git's. A failed
+# `git diff` yields an empty list, and an empty list is exactly what "nothing staged" looks like:
+# the two loops would then scan nothing and the commit would pass by having read no files at all.
+# So git's status is taken on its own line, before grep can hide it.
+if ! all_staged="$(git diff --cached --name-only --diff-filter=ACMR)"; then
+	echo 'pre-commit: `git diff --cached` failed — refusing to commit rather than scan nothing.' >&2
+	exit 1
+fi
+staged=$(printf '%s\n' "$all_staged" | grep -Ev "$SKIP_PATH" || true)
+
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	if printf '%s\n' "$f" | grep -Eq "$SECRET_PATH"; then
+		echo "pre-commit: refusing to commit secret file: $f" >&2
+		fail=1
+	fi
+done <<< "$staged"
+
+while IFS= read -r f; do
+	[ -n "$f" ] || continue
+	# Added lines only, with the diff's leading '+' stripped so ^-anchors work.
+	if git diff --cached -U0 --diff-filter=ACMR -- "$f" | sed -n 's/^+//p' | grep -Eiv "$PLACEHOLDER" | grep -Eq "$SECRET_VALUE"; then
+		echo "pre-commit: $f adds what looks like a live secret value." >&2
+		fail=1
+	fi
+done <<< "$staged"
+
+if [ "$fail" -ne 0 ]; then
+	echo 'pre-commit: aborted. Secrets belong in .env (git-ignored); commit only the `env` placeholder template.' >&2
+	echo 'pre-commit: if this is genuinely a placeholder, re-run with: git commit --no-verify' >&2
+	exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Nothing follows, and that is the whole tail.
+#
+# The other five variants of this hook continue here with the gates their repo
+# can actually run — lint, type check, coverage, Qodana. marketplace-nginx
+# carries no package.json and no JavaScript, so there is nothing for any of them
+# to run against. What this repo does have is test/run.sh, and that needs a
+# container engine and an image: minutes of setup on a cold machine, for a repo
+# whose ordinary commit is one directive. It runs in .githooks/pre-push instead,
+# which is also where a merge commit and anything committed with --no-verify are
+# finally seen.
+#
+# So this file exists for exactly one reason: without it, marketplace-nginx was
+# the only repo of the sixteen where a staged credential was caught by nothing.
+# ---------------------------------------------------------------------------
+exit 0

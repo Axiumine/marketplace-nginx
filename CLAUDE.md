@@ -87,11 +87,16 @@ hydrates, with nothing in the console.
 
 ## Gates
 
-⚠️ **`.githooks/pre-push` is the only gate in this repo, and there is no `pre-commit`** — so **no secret
-guard runs on a commit here**, unlike the other fifteen repos. The hook runs `test/run.sh` and blocks
-the push on any failure. It also blocks rather than skips when `test/run.sh` is missing or not
-executable, when the container engine is absent or its daemon unreachable, or when the test image is
-not already present locally. There is no bypass variable.
+Two hooks, neither shaped like any other repo's (ADR-030), because this one has no `package.json`.
+
+**`.githooks/pre-push`** runs `test/run.sh` and blocks the push on any failure. It also blocks rather
+than skips when `test/run.sh` is missing or not executable, when the container engine is absent or its
+daemon unreachable, or when the test image is not already present locally. There is no bypass variable.
+
+**`.githooks/pre-commit`** is the platform's secret guard — check 0 plus the two staged-secret scans —
+and stops there, with no gate after it. ⚠️ **Its body is byte-identical to the other fifteen copies and
+must stay that way**: a fix to any one of the six variants is copied to the other five, and only the
+header comment above the body differs per repo.
 
 ⚠️ **The hook is not self-arming.** This repo has no `package.json`, so no `prepare` script sets
 `core.hooksPath`. Once, by hand, after a fresh clone:
