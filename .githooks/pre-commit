@@ -120,7 +120,7 @@ staged="$all_staged"
 
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
-	if printf '%s\n' "$f" | grep -Eq "$SECRET_PATH"; then
+	if printf '%s\n' "$f" | grep -Eq -e "$SECRET_PATH"; then
 		echo "pre-commit: refusing to commit secret file: $f" >&2
 		fail=1
 	fi
@@ -129,7 +129,12 @@ done <<< "$staged"
 while IFS= read -r f; do
 	[ -n "$f" ] || continue
 	# Added lines only, with the diff's leading '+' stripped so ^-anchors work.
-	if git diff --cached -U0 --diff-filter=ACMR -- "$f" | sed -n 's/^+//p' | grep -Eiv "$PLACEHOLDER" | grep -Eq "$SECRET_VALUE"; then
+	#
+	# `-e` is load-bearing on both greps, not style: SECRET_VALUE starts with the
+	# `-----BEGIN` branch, so without it grep reads the pattern as a bundle of options,
+	# prints a usage error and exits 2 — and `if` takes the false path, so every staged
+	# file passes the scan. A dead guard that still looks installed.
+	if git diff --cached -U0 --diff-filter=ACMR -- "$f" | sed -n 's/^+//p' | grep -Eiv -e "$PLACEHOLDER" | grep -Eq -e "$SECRET_VALUE"; then
 		echo "pre-commit: $f adds what looks like a live secret value." >&2
 		fail=1
 	fi
