@@ -375,3 +375,7 @@ this.
   `secure: true`, not here.
 - **HTTP/3 is not configured.** `listen 443 quic reuseport` plus an `Alt-Svc` header would add it;
   it needs a build with the QUIC module and is a performance change, not a correctness one.
+
+## License
+
+GPL-3.0-or-later — see [LICENSE](./LICENSE).
