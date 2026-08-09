@@ -169,10 +169,10 @@ sudo certbot certonly --webroot -w /var/www/acme -d admin.marketplace-domain.com
 ## Testing it, before it reaches a host
 
 ```bash
-./nginx/test/run.sh
+./marketplace-nginx/test/run.sh
 ```
 
-Starts a throwaway `nginx:stable-alpine` container with `nginx/` mounted read-only, generates self-signed
+Starts a throwaway `nginx:stable-alpine` container with `marketplace-nginx/` mounted read-only, generates self-signed
 certificates so the `ssl_certificate` lines resolve, runs `nginx -t`, then starts nginx for real against
 stand-in backends and asserts what comes out of the socket. Exits non-zero on any failure. Nothing is
 installed on the machine and nothing is written to the repository.
@@ -207,8 +207,8 @@ flags itself; the headline test would then pass with nginx doing nothing.
 Check a version bump before rolling it out:
 
 ```bash
-NGINX_TEST_IMAGE=nginx:1.29-alpine ./nginx/test/run.sh
-CONTAINER_ENGINE=podman ./nginx/test/run.sh
+NGINX_TEST_IMAGE=nginx:1.29-alpine ./marketplace-nginx/test/run.sh
+CONTAINER_ENGINE=podman ./marketplace-nginx/test/run.sh
 ```
 
 **Real defects this suite found, all of them already fixed here.** The first two are the ones worth
@@ -307,7 +307,7 @@ Add a location that sets a header, include the snippet there too, or that respon
 line-continuation inside a quoted string — the backslash escapes the newline and embeds a literal LF,
 and the header is discarded on the way out while every other `add_header` in the file keeps working.
 Both snippets keep the value on a single line with the directive list in a comment above it. `nginx -t`
-does not catch this; `./nginx/test/run.sh` does.
+does not catch this; `./marketplace-nginx/test/run.sh` does.
 
 **The SSR renderer must emit `nonce="__CSP_NONCE__"` verbatim, not a real nonce.** nginx substitutes it
 per request with `sub_filter`, after the cache. A renderer that stamps its own value bakes one visitor's
