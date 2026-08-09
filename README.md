@@ -12,9 +12,16 @@ per-service: a single nginx instance fronts eleven loopback upstreams across fiv
 all three vhosts share the upstream table and the rate-limit zones, and the same `logout` service answers
 on all three hosts. Split across the service repos, no copy is ever the whole configuration.
 
-⚠️ **This repo has no `package.json` and no `.githooks/`** — no lint, no coverage, no Qodana, and **not
-the secret guard either**. It is the one repo on the platform where a committed credential is caught by
-nothing. There is none today; keep it that way by hand.
+⚠️ **This repo has no `package.json`, so it gates on push only.** `.githooks/pre-push` runs
+`test/run.sh` and blocks the push on the first failed check — that is the whole gate, because there is
+no lint, no coverage, no mutation score and no Qodana project here for anything else to run. **There is
+no `pre-commit` hook, so the platform's secret guard does not run here**: a committed credential is
+caught by nothing. There is none today; keep it that way by hand.
+
+⚠️ **`core.hooksPath` is local config and no `prepare` script arms it here.** After a fresh clone,
+`git config core.hooksPath .githooks` — until you run it the hook is off and a push is ungated with no
+output to say so. This repo and the parent workspace are the two with no `package.json` and so the two
+that must be armed by hand.
 
 **No nginx exists in this workspace or on this development machine** — there is no `/etc/nginx` and no
 nginx binary in `PATH`. These files describe the production edge. Nothing here has been run.
@@ -93,6 +100,7 @@ then a second lock on the same door, and the only one a config review can see.
 |`sites-available/marketplace-domain.com.conf`|—|customer vhost: SSR, cache, static, 5 endpoints, geocoder|
 |`sites-available/shopowner.marketplace-domain.com.conf`|—|shop-owner vhost: SPA, 4 endpoints, `/check/verify-email/`|
 |`sites-available/admin.marketplace-domain.com.conf`|—|operator vhost: SPA, 4 endpoints|
+|`.githooks/pre-push`|—|the only gate in this repo — runs `test/run.sh`, blocks the push on any failure|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
 |`test/suite.sh`|—|`nginx -t` plus 168 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
@@ -183,6 +191,15 @@ installed on the machine and nothing is written to the repository.
 
 There is no nginx on the development machine, which is the whole reason this exists: without it the only
 way to find out whether a directive works is to install the configuration somewhere that matters.
+
+**`.githooks/pre-push` runs exactly this on every push and blocks on any failure.** It checks its
+prerequisites first and blocks rather than skipping when one is missing — no container engine, an
+unreachable daemon, the image absent locally, a non-executable `test/run.sh` — because a gate that
+steps aside when it cannot run is not a gate, and this repo has only the one. It reads the engine and
+image defaults out of `test/run.sh` instead of repeating them, and honours the same two overrides, so
+`NGINX_TEST_IMAGE=nginx:1.29-alpine git push` checks and tests the image it is about to gate on. There
+is no bypass variable: the suite takes well under a minute, and `git push --no-verify` is the escape
+hatch precisely because it is conspicuous.
 
 |Group|What it asserts|
 |---|---|
