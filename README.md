@@ -455,8 +455,10 @@ knowing; neither is visible to `nginx -t` and neither is visible by reading the 
    `userRegister` mutation. **No `/api/*` route has ever existed in `marketplace-user/src/routes/`**, so
    both blocks matched paths the renderer answers with a 404 and the zone metered nothing. Deleted rather
    than built: the Turnstile secret is already server-side in `marketplace-dev-public-resource` and always
-   was, and registration is already limited there by `guardPublicWrite` — two Redis counters per hour, per
-   IP *and per email address*, the second of which no `$binary_remote_addr` zone can express. Building the
+   was, and registration is already limited there by `guardPublicWrite` — one Redis counter per hour *per
+   email address*, which no `$binary_remote_addr` zone can express (the per-address half is this repo's,
+   and the service's own copy of it was removed by E12-S10 as a counter that metered nothing but nginx).
+   Building the
    route would have pushed plaintext passwords through a second process to weaken both controls. The apex
    vhost and `conf.d/20-rate-limit.conf` each carry the reasoning where the block used to be.
 

@@ -108,9 +108,14 @@ the access-log format as having closed the question for the whole edge.
   expires silently**: Cloudflare adds ranges, a stale list stops trusting a point of presence, and the
   only symptom is `$remote_addr` reverting to an edge address for those visitors. Regeneration command
   at the top of the file; review trigger is risk R43 in the parent workspace.
-- **No `/api/register` location and no `mkt_register` zone, deliberately.** The app has no such route,
-  and the real limit is `guardPublicWrite` in `marketplace-dev-public-resource`, per-IP *and*
-  per-email, which no nginx zone can express. Do not add one.
+- **No `/api/register` location and no `mkt_register` zone, deliberately.** The app has no such route:
+  registration is a GraphQL mutation on the one endpoint the vhost already meters. The limit is split,
+  and each half sits where it can be enforced — **per client address here**, in the zones above, and
+  **per email address in `guardPublicWrite`** (`marketplace-dev-public-resource`), which is the half no
+  zone can express, since a zone keyed on `$binary_remote_addr` never sees the inbox a distributed
+  source is mail-bombing. The services kept a per-address counter of their own until E12-S10 and it was
+  a fiction — `app.proxy` is off, so the address they see is this proxy's and the counter metered the
+  whole platform at once. Do not add a location, and do not expect the backend to bucket callers.
 - **The suite proves configuration, never application behaviour.** All eleven upstreams are canned
   nginx stubs, and the four authorization stubs mint cookies exactly the way koa-utils does today
   (`secure: false`, no `SameSite`) — so anything the suite reports as flagged was flagged by nginx.
