@@ -90,6 +90,7 @@ then a second lock on the same door, and the only one a config review can see.
 |File|Level|Role|
 |---|---|---|
 |`conf.d/00-hardening.conf`|http|`server_tokens off`, slow-request timeouts, header buffers|
+|`conf.d/05-logging.conf`|http|`log_format mkt_access` — the one access-log format, and it records no address|
 |`conf.d/10-upstreams.conf`|http|every backend, one `upstream` each, with keepalive pools|
 |`conf.d/20-rate-limit.conf`|http|`limit_req_zone` / `limit_conn_zone` — per-surface, not shared|
 |`conf.d/30-cache.conf`|http|HTML cache zone and session-bypass map, customer surface only|
@@ -103,8 +104,9 @@ then a second lock on the same door, and the only one a config review can see.
 |`.githooks/pre-commit`|—|the platform secret guard, and nothing after it — no code here to gate|
 |`.githooks/pre-push`|—|the quality gate — runs `test/run.sh`, blocks the push on any failure|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
-|`test/suite.sh`|—|`nginx -t` plus 168 behavioural assertions; runs *inside* the container|
+|`test/suite.sh`|—|`nginx -t` plus 182 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
+|`test/real-ip-overlay.conf`|http|test-only — trusts the loopback so the log assertions run against the post-`set_real_ip_from` shape|
 
 `conf.d/*` must be included at `http` level — `proxy_cache_path`, `limit_req_zone`, `map` and `upstream`
 are not valid inside a `server` block. On Debian, `/etc/nginx/conf.d/*.conf` is already included from
@@ -216,8 +218,17 @@ hatch precisely because it is conspicuous.
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
 |rate limits|all three login zones — customer, shop owner, operator — let the burst through and then return 429, each out of its own budget|
+|access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
 
-The rate-limit group runs **last, after a full nginx restart**, and every other endpoint is probed
+The access-logging group runs after the rate-limit one and reloads nginx a second time, with
+`test/real-ip-overlay.conf` trusting the loopback. That overlay exists because the deployed
+`conf.d/06-real-ip.conf` cannot be used here: it trusts Cloudflare's published ranges, the container
+connects from its own loopback, and the real file would therefore leave `$remote_addr` at 127.0.0.1 —
+the second half of the assertions would pass without ever having been exercised. The upstream echoes
+`X-Real-IP` back, and the suite asserts it has become the client address before believing anything the
+log assertions say.
+
+The rate-limit group runs **after everything except that, and after a full nginx restart**, and every other endpoint is probed
 exactly once. `limit_req` counters live in shared memory: they survive a reload, and a suite that spent
 the budget early would fail the endpoints it tested afterwards for the wrong reason.
 
@@ -353,6 +364,19 @@ back.
 second proxy that is the proxy's address: every visitor shares one bucket and an allow-list allows the
 whole internet. Configure `set_real_ip_from` and switch the key before putting anything in front of
 this.
+
+**An `access_log` with no format name is not a default, it is `combined` — and so is declaring none at
+all.** `conf.d/05-logging.conf` defines `mkt_access`, which records no address of any kind, and all
+eight server blocks name it. A server block that declares no `access_log` inherits the stock http-level
+one instead, which is why the three `:80` redirects, the `www` redirect and the `444` default server
+each carry the line rather than only the three vhosts. And an http-level `access_log` here would not
+fix that: `access_log` is additive at the same level, so the stock one would keep writing alongside it.
+Today the address in those lines would be a Cloudflare edge address; `conf.d/06-real-ip.conf` turns it
+into a visitor's, with nothing in that diff to say so.
+
+**The `error_log` is a separate file that none of this reaches.** nginx hard-codes a `client: <address>`
+prefix into every error entry and exposes no format for it — only the destination and the level. The
+access-log format is not a property of the edge as a whole.
 
 ## Known gaps, stated so they are not read as oversights
 

@@ -9,7 +9,7 @@ eleven loopback processes. the one way to execute any of it is the throwaway con
 |---|---|
 | what every file holds, the host → path → service → port matrix, install, env assumptions | [`README.md`](./README.md) |
 | the suite and its assertion groups | [`README.md`](./README.md) §Testing it, before it reaches a host |
-| seven nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
+| nine nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
 | what is deliberately not built here | [`README.md`](./README.md) §Known gaps |
 | why the `Secure` flag is rewritten at the edge at all | [`README.md`](./README.md) §⚠️ The `Secure` cookie flag lives here |
 | why the edge is a repo of its own, and the port table | [`../docs/architecture.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/architecture.md) §nginx |
@@ -64,6 +64,21 @@ into its inline script tags and nginx substitutes the per-request `$csp_nonce` o
 cached page never carries one visitor's nonce. `location /` therefore forces `Accept-Encoding ""` —
 `sub_filter` cannot rewrite a compressed body. Break either half and the page loads but never
 hydrates, with nothing in the console.
+
+⚠️ **The access logs carry no client address, and one new `access_log` line reopens that.**
+`conf.d/05-logging.conf` defines `log_format mkt_access`, which omits `$remote_addr` and every other
+address variable by the same 2026-08-10 decision that took the address out of the Sentry events
+(E12-S07), and **every** `access_log` directive in the repo names it — all eight server blocks, not
+the three vhosts, because a block that declares none inherits the stock http-level one and that is
+`combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
+none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
+
+⚠️ **The error log is a different file and this does not cover it.** nginx builds each error entry
+with a hard-coded `client: <address>` prefix; only the destination and the level are configurable, so
+no `log_format` reaches it and the three vhosts running it at `warn` still write addresses there.
+Which levels emit that prefix in this configuration, and what the retention on those files is, is open
+work — E12-S12 in the parent workspace's `docs/devprotocol/phase5/epics/E12.md` owns it. Do not read
+the access-log format as having closed the question for the whole edge.
 
 - **Ports live in the service `env` templates, not here.** `conf.d/10-upstreams.conf` mirrors
   `grep -m1 '^PORT=' <repo>/env`. Move a port in the template first and here second.

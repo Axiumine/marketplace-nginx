@@ -478,6 +478,125 @@ burst_probe marketplace-domain.com           /public-authorization 24 'customer 
 # per email address. The per-email half is what actually stops a mail-bomb and no nginx zone keyed
 # on $binary_remote_addr can express it. See the comments in 20-rate-limit.conf and the apex vhost.
 
+# --------------------------------------------------------------------------------------
+# Access logging — E12-S07. Last in the run, because its second half reloads nginx with
+# `set_real_ip_from` pointed at the loopback, which changes the key every rate-limit zone
+# buckets on and would quietly invalidate the section above it.
+# --------------------------------------------------------------------------------------
+echo
+echo '==================================================================='
+echo ' Access logs carry no client address'
+echo '==================================================================='
+
+# RFC 5737 documentation addresses rather than plausible ones: a line that leaks either is
+# unmistakable in this output, and neither can collide with anything the container itself uses.
+CLIENT_IP=203.0.113.77
+HOP_IP=198.51.100.9
+
+# The static half — the format itself. This is the grep a reviewer runs; keeping it here means a
+# variable added to the format later fails a run rather than waiting for the next review.
+FMT=$(sed -n '/^log_format/,/;/p' /src/conf.d/05-logging.conf)
+_bad=''
+for _v in '$remote_addr' '$binary_remote_addr' '$realip_remote_addr' '$http_x_forwarded_for' \
+	'$proxy_add_x_forwarded_for' '$http_x_real_ip'; do
+	case "$FMT" in *"$_v"*) _bad="$_bad $_v" ;; esac
+done
+[ -z "$_bad" ] && pass 'log_format mkt_access names no address variable' ||
+	fail "log_format mkt_access names$_bad"
+
+# The other direction, and it is not decoration: a format that logs nothing is trivially clean and
+# gets reverted the first time somebody has to debug from it, which loses the property above too.
+_missing=''
+for _v in '$time_iso8601' '$host' '$request' '$status' '$body_bytes_sent' '$http_referer' \
+	'$http_user_agent' '$request_time' '$upstream_response_time'; do
+	case "$FMT" in *"$_v"*) ;; *) _missing="$_missing $_v" ;; esac
+done
+[ -z "$_missing" ] && pass 'log_format mkt_access keeps everything not derived from the network' ||
+	fail "log_format mkt_access dropped$_missing"
+
+# An `access_log` with no format name means the built-in `combined`, and so does a server block
+# that declares none at all and inherits the stock http-level one. Both start with the address, so
+# one new vhost written from the old template reopens this with nothing to see in the diff.
+_unnamed=$(grep -rn '^[[:space:]]*access_log[[:space:]]' /src/conf.d /src/sites-available /src/snippets |
+	grep -v '[[:space:]]off;' | grep -v 'mkt_access;')
+if [ -z "$_unnamed" ]; then
+	pass 'every access_log directive in the repo names its format'
+else
+	fail 'access_log with no format name — that is the built-in combined:'
+	echo "$_unnamed" | sed 's/^/        /'
+fi
+
+# assert_log_clean FILE LABEL — the newest line must exist, and contain no address in any form.
+# ⚠️ The empty check is not a formality. "This address does not appear" is satisfied by a line
+# that was never written, so without it the whole section passes on a broken log path — and would
+# have passed before this story existed.
+assert_log_clean() {
+	_line=$(tail -1 "/var/log/nginx/$1")
+	if [ -z "$_line" ]; then
+		fail "$2 — nothing was logged at all, so the address assertion never ran"
+		return
+	fi
+	_hit=''
+	for _a in "$CLIENT_IP" "$HOP_IP" 127.0.0.1; do
+		case "$_line" in *"$_a"*) _hit="$_hit $_a" ;; esac
+	done
+	if [ -n "$_hit" ]; then
+		fail "$2 — address(es)$_hit in: $_line"
+	else
+		pass "$2"
+		echo "        $_line"
+	fi
+}
+
+# ⚠️ The request has to arrive the way Cloudflare sends it. Asserting no address appears in the
+# log of a request that carried none proves nothing at all.
+log_probe() {   # HOST
+	: >"/var/log/nginx/$1.access.log"
+	probe GET "$1" / -H "CF-Connecting-IP: $CLIENT_IP" -H "X-Forwarded-For: $CLIENT_IP, $HOP_IP"
+}
+
+for h in $HOSTS; do
+	log_probe "$h"
+	assert_status 200 "$h answered the logged request"
+	assert_log_clean "$h.access.log" "$h — no address in the access log"
+done
+
+# E12-S07 changes what is written to disk and nothing else. The forwarded address is load-bearing:
+# it is what a service would have to read if it ever needed one, and this assertion is what stops
+# the story being read as a licence to strip the headers.
+probe POST marketplace-domain.com /public-resource -H "X-Forwarded-For: $CLIENT_IP"
+assert_body 'xri=127.0.0.1' 'X-Real-IP still reaches the upstream'
+assert_body "xff=$CLIENT_IP, 127.0.0.1" 'X-Forwarded-For still reaches the upstream'
+
+echo
+echo '  --- and again with set_real_ip_from configured, which is the state this format exists for ---'
+cp /src/test/real-ip-overlay.conf /etc/nginx/conf.d/98-real-ip-overlay.conf
+if nginx -t >/tmp/nginx-t3.out 2>&1; then
+	nginx -s stop 2>/dev/null
+	sleep 1
+	nginx
+	sleep 1
+
+	# Prove the overlay took effect before believing anything below it. `X-Real-IP` is
+	# `$remote_addr`, so the upstream echoing the client address is the realip module having
+	# rewritten it — without this check the three assertions that follow pass on a run in which
+	# nothing changed, which is exactly the failure this half exists to rule out.
+	probe POST marketplace-domain.com /public-resource -H "CF-Connecting-IP: $CLIENT_IP"
+	assert_body "xri=$CLIENT_IP" 'set_real_ip_from took effect — $remote_addr is now the client'
+
+	for h in $HOSTS; do
+		log_probe "$h"
+		assert_log_clean "$h.access.log" "$h — still no address once \$remote_addr is the client"
+	done
+else
+	fail 'the real_ip overlay broke the configuration'
+	sed 's/^/        /' /tmp/nginx-t3.out
+fi
+
+# ⚠️ Nothing above touches the error log, and nothing can: nginx builds each entry with a
+# hard-coded `client: <address>` prefix and no `log_format` reaches it. See conf.d/05-logging.conf
+# and E12-S12, which owns the residue.
+
 echo
 echo '==================================================================='
 if [ "$FAILED" -eq 0 ]; then
