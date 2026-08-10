@@ -9,7 +9,7 @@ eleven loopback processes. the one way to execute any of it is the throwaway con
 |---|---|
 | what every file holds, the host → path → service → port matrix, install, env assumptions | [`README.md`](./README.md) |
 | the suite and its assertion groups | [`README.md`](./README.md) §Testing it, before it reaches a host |
-| eleven nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
+| thirteen nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
 | what is deliberately not built here | [`README.md`](./README.md) §Known gaps |
 | why the `Secure` flag is rewritten at the edge at all | [`README.md`](./README.md) §⚠️ The `Secure` cookie flag lives here |
 | why the edge is a repo of its own, and the port table | [`../docs/architecture.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/architecture.md) §nginx |
@@ -78,6 +78,16 @@ address variable by the same 2026-08-10 decision that took the address out of th
 the three vhosts, because a block that declares none inherits the stock http-level one and that is
 `combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
 none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
+
+⚠️ **All four 443 blocks demand a client certificate, so the origin answers Cloudflare and nobody
+else.** `snippets/origin-pull.conf` (E12-S15) is included at server level four times, not three — the
+`www` redirect is a server block of its own, and a hostname without the include goes on answering anyone
+who knows the origin address. Two consequences to hold on to: a monitoring probe or a `curl --resolve`
+aimed straight at the origin gets `400 Bad Request — No required SSL certificate was sent`, and that is
+the control working, not a fault; and the CA is referenced by path and never committed, so the test
+container generates a throwaway one of its own. The Cloudflare side is **not yet enabled**, so the
+staged `optional` → `on` rollout in `README.md` §Authenticated Origin Pulls is the only safe way to put
+this on a host — reloading straight to `on` first is an outage on all three hostnames.
 
 ⚠️ **The error log is a different file and this does not cover it.** nginx builds each error entry
 with a hard-coded `client: <address>` prefix; only the destination and the level are configurable, so

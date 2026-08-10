@@ -28,6 +28,30 @@ for h in $HOSTS; do
 		-subj "/CN=$h" >/dev/null 2>&1
 done
 
+# Authenticated Origin Pulls (E12-S15). `snippets/origin-pull.conf` trusts a CA by path that is
+# never committed, so the suite generates a throwaway one where the snippet expects it. Cloudflare's
+# own key is not available to a test and never will be; what is testable is the property that
+# matters — nginx refuses a caller without a certificate from that CA, and serves one with it.
+mkdir -p /etc/nginx/certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=marketplace origin pull test CA' \
+	-keyout /tmp/origin-pull-ca.key -out /etc/nginx/certs/origin-pull-ca.pem >/dev/null 2>&1
+
+issue_client() {   # NAME CA-CERT CA-KEY — a client certificate signed by that CA
+	openssl req -new -newkey rsa:2048 -nodes -subj '/CN=cloudflare-origin-pull' \
+		-keyout "/tmp/$1.key" -out "/tmp/$1.csr" >/dev/null 2>&1
+	openssl x509 -req -in "/tmp/$1.csr" -CA "$2" -CAkey "$3" -CAcreateserial -days 1 -sha256 \
+		-out "/tmp/$1.crt" >/dev/null 2>&1
+}
+
+issue_client cf-client /etc/nginx/certs/origin-pull-ca.pem /tmp/origin-pull-ca.key
+
+# ⚠️ A second, unrelated CA. "Signed by somebody" must not be enough — that is the whole argument
+# against Cloudflare's shared global origin-pull certificate, which every Cloudflare customer is
+# handed. See README.md §Three configurations.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=rogue CA' \
+	-keyout /tmp/rogue-ca.key -out /tmp/rogue-ca.crt >/dev/null 2>&1
+issue_client rogue /tmp/rogue-ca.crt /tmp/rogue-ca.key
+
 mkdir -p /etc/nginx/snippets /etc/nginx/sites-enabled
 cp /src/conf.d/*.conf          /etc/nginx/conf.d/
 cp /src/snippets/*.conf        /etc/nginx/snippets/
@@ -118,6 +142,11 @@ RESOLVE="--resolve marketplace-domain.com:443:127.0.0.1
 # shellcheck disable=SC2086
 RESOLVE=$(echo $RESOLVE)
 
+# ⚠️ Every https request in this suite presents Cloudflare's stand-in certificate, because
+# `ssl_verify_client on` is what all four 443 blocks now do. The `:80` requests deliberately do
+# not, which is what keeps proving that ACME renewal is untouched by it.
+CLIENT='--cert /tmp/cf-client.crt --key /tmp/cf-client.key'
+
 HDR=/tmp/probe.hdr
 BODY=/tmp/probe.body
 
@@ -133,7 +162,7 @@ probe() {
 	_p=$3
 	shift 3
 	# shellcheck disable=SC2086
-	curl -sk -X "$_m" -o "$BODY" -D "$HDR".raw $RESOLVE "$@" "https://$_h$_p" 2>/dev/null
+	curl -sk -X "$_m" -o "$BODY" -D "$HDR".raw $RESOLVE $CLIENT "$@" "https://$_h$_p" 2>/dev/null
 	tr -d '\r' <"$HDR".raw >"$HDR"
 }
 
@@ -415,6 +444,70 @@ _code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve nothing.marketplace-do
 
 echo
 echo '==================================================================='
+echo ' Authenticated Origin Pulls — only Cloudflare opens a connection'
+echo '==================================================================='
+
+# Static half. Four includes, not three: a vhost count leaves out the `www` redirect, which is a
+# server block of its own and would go on answering an unauthenticated caller.
+_inc=$(grep -h -c 'include snippets/origin-pull.conf;' /src/sites-available/*.conf | awk '{s+=$1} END {print s}')
+[ "$_inc" = 4 ] && pass 'origin-pull.conf is included by all four 443 blocks' ||
+	fail "origin-pull.conf is included $_inc time(s), expected 4"
+
+_def=$(grep -rl 'ssl_verify_client' /src/conf.d /src/snippets /src/sites-available | wc -l)
+[ "$_def" = 1 ] && pass 'ssl_verify_client is declared in exactly one file' ||
+	fail "ssl_verify_client is declared in $_def files — it belongs in the snippet only"
+
+# ⚠️ The default server is left alone on purpose. `ssl_reject_handshake on` refuses earlier in the
+# handshake than client verification runs, so these directives there are dead configuration that
+# reads as a second control.
+if grep -q 'ssl_verify_client\|ssl_client_certificate' /src/conf.d/40-tls.conf; then
+	fail 'the default server declares client verification — dead configuration, ssl_reject_handshake is earlier'
+else
+	pass 'the default server block is untouched'
+fi
+
+# Behavioural half. Four names, because there are four 443 blocks.
+TLS_HOSTS='marketplace-domain.com www.marketplace-domain.com shopowner.marketplace-domain.com admin.marketplace-domain.com'
+
+for h in $TLS_HOSTS; do
+	# shellcheck disable=SC2086
+	_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE "https://$h/" 2>/dev/null)
+	[ "$_c" = 400 ] && pass "$h refuses a caller presenting no client certificate → 400" ||
+		fail "$h served a caller presenting no client certificate → $_c"
+done
+
+for h in $TLS_HOSTS; do
+	# shellcheck disable=SC2086
+	_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE $CLIENT "https://$h/" 2>/dev/null)
+	case "$_c" in
+		200|308) pass "$h serves a certificate signed by the trusted CA → $_c" ;;
+		*)       fail "$h refused the trusted client certificate → $_c" ;;
+	esac
+done
+
+# ⚠️ Issuer, not merely "a certificate". Cloudflare's shared global origin-pull certificate is
+# handed to every Cloudflare customer, so trusting that CA would admit anyone willing to open a
+# free account and point their own zone here.
+# shellcheck disable=SC2086
+_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE --cert /tmp/rogue.crt --key /tmp/rogue.key \
+	"https://marketplace-domain.com/" 2>/dev/null)
+case "$_c" in
+	200|308) fail "a certificate from an unrelated CA was accepted → $_c" ;;
+	*)       pass "a certificate from an unrelated CA is refused → ${_c:-handshake aborted}" ;;
+esac
+
+# ⚠️ Port 80 carries no client verification and must not: an ACME HTTP-01 renewal presents no
+# certificate, and breaking it would take the TLS material down with it a few weeks later. The
+# ACME assertions above already run without $CLIENT; this is the same property stated where
+# somebody adding a directive to the `:80` blocks will read it.
+curl -s -o "$BODY" -D "$HDR".raw --resolve "marketplace-domain.com:80:127.0.0.1" \
+	"http://marketplace-domain.com/.well-known/acme-challenge/probe-token" 2>/dev/null
+tr -d '\r' <"$HDR".raw >"$HDR"
+[ "$(status)" = 200 ] && pass 'ACME on :80 still completes with no client certificate' ||
+	fail "ACME on :80 → $(status) with no client certificate; certbot renewal would fail"
+
+echo
+echo '==================================================================='
 echo ' Panel hardening'
 echo '==================================================================='
 for h in shopowner.marketplace-domain.com admin.marketplace-domain.com; do
@@ -449,7 +542,7 @@ burst_probe() {   # HOST PATH COUNT LABEL
 	_i=0
 	while [ "$_i" -lt "$3" ]; do
 		# shellcheck disable=SC2086
-		_codes="$_codes $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE "https://$1$2" 2>/dev/null)"
+		_codes="$_codes $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE $CLIENT "https://$1$2" 2>/dev/null)"
 		_i=$((_i + 1))
 	done
 	echo "      $4:$_codes"
@@ -617,7 +710,7 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 		_i=0
 		while [ "$_i" -lt "$4" ]; do
 			# shellcheck disable=SC2086
-			_out="$_out $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE \
+			_out="$_out $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE $CLIENT \
 				-H "CF-Connecting-IP: $1" "https://$2$3" 2>/dev/null)"
 			_i=$((_i + 1))
 		done
