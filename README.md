@@ -91,6 +91,7 @@ then a second lock on the same door, and the only one a config review can see.
 |---|---|---|
 |`conf.d/00-hardening.conf`|http|`server_tokens off`, slow-request timeouts, header buffers|
 |`conf.d/05-logging.conf`|http|`log_format mkt_access` — the one access-log format, and it records no address|
+|`conf.d/06-real-ip.conf`|http|Cloudflare's ranges + `CF-Connecting-IP` — the only place the platform learns a client address|
 |`conf.d/10-upstreams.conf`|http|every backend, one `upstream` each, with keepalive pools|
 |`conf.d/20-rate-limit.conf`|http|`limit_req_zone` / `limit_conn_zone` — per-surface, not shared|
 |`conf.d/30-cache.conf`|http|HTML cache zone and session-bypass map, customer surface only|
@@ -104,7 +105,7 @@ then a second lock on the same door, and the only one a config review can see.
 |`.githooks/pre-commit`|—|the platform secret guard, and nothing after it — no code here to gate|
 |`.githooks/pre-push`|—|the quality gate — runs `test/run.sh`, blocks the push on any failure|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
-|`test/suite.sh`|—|`nginx -t` plus 182 behavioural assertions; runs *inside* the container|
+|`test/suite.sh`|—|`nginx -t` plus 190 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
 |`test/real-ip-overlay.conf`|http|test-only — trusts the loopback so the log assertions run against the post-`set_real_ip_from` shape|
 
@@ -218,6 +219,7 @@ hatch precisely because it is conspicuous.
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
 |rate limits|all three login zones — customer, shop owner, operator — let the burst through and then return 429, each out of its own budget|
+|real client address|a `CF-Connecting-IP` from outside `set_real_ip_from` is ignored and the caller's `X-Forwarded-For` never reaches the upstream; from inside it, `$remote_addr` becomes the claimed address, a second address gets a budget of its own, and flooding a rotation zone leaves that address able to log in — and the reverse|
 |access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
 
 The access-logging group runs after the rate-limit one and reloads nginx a second time, with
@@ -360,10 +362,19 @@ grounds that nginx is handling it — and never turn SSR on for an `/account` ro
 panels have zones of their own for exactly that reason; renaming one to reuse another's merges them
 back.
 
-**All zones key on `$binary_remote_addr`, and so do the commented-out allow-lists.** Behind a CDN or a
-second proxy that is the proxy's address: every visitor shares one bucket and an allow-list allows the
-whole internet. Configure `set_real_ip_from` and switch the key before putting anything in front of
-this.
+**All zones key on `$binary_remote_addr`, and so do the commented-out allow-lists — which means they
+key on whatever `conf.d/06-real-ip.conf` last said to trust.** Delete that file and every visitor
+shares one bucket per Cloudflare point of presence and an allow-list allows the whole internet; widen
+`set_real_ip_from` past Cloudflare's ranges and any caller can claim any address by setting one header.
+The list in it is a vendored copy of `cloudflare.com/ips-v4` and `ips-v6` with the fetch date and the
+regeneration command at the top, and it expires without failing: a range Cloudflare added after that
+date is simply not trusted, and the only symptom is those visitors metering as an edge address again.
+
+**Read `CF-Connecting-IP`, never `X-Forwarded-For`.** Cloudflare appends to a caller-supplied
+`X-Forwarded-For` rather than replacing it, so its first entry is attacker-controlled; a limiter keyed
+on it gives every attacker a private bucket, which is worse than the shared one. `CF-Connecting-IP` is
+single-valued and overwritten unconditionally, and `real_ip_recursive` is `off` because a single-valued
+header has no chain to walk.
 
 **An `access_log` with no format name is not a default, it is `combined` — and so is declaring none at
 all.** `conf.d/05-logging.conf` defines `mkt_access`, which records no address of any kind, and all

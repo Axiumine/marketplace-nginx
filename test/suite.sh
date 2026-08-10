@@ -463,13 +463,13 @@ burst_probe() {   # HOST PATH COUNT LABEL
 	esac
 }
 
-burst_probe admin.marketplace-domain.com     /public-authorization 12 'operator login  (mkt_admin_auth 10r/m)'
-burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 20r/m)'
+burst_probe admin.marketplace-domain.com     /public-authorization 24 'operator login  (mkt_admin_auth 1r/m b20)'
+burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 1r/m b20)'
 # The customer surface's own login zone. The two probes above are on the panel hostnames and spend
 # `mkt_owner_auth` / `mkt_admin_auth`; `mkt_auth` is a third, separate budget reached only through
 # the apex — which is the whole point of giving the three logins zones of their own, since they all
 # land on the same service (public-authorization, 4028).
-burst_probe marketplace-domain.com           /public-authorization 24 'customer login  (mkt_auth 20r/m)'
+burst_probe marketplace-domain.com           /public-authorization 24 'customer login  (mkt_auth 1r/m b20)'
 
 # ⚠️ There is deliberately no registration burst test, because there is no `mkt_register` zone to
 # test and no `/api/register` to aim one at. Registration is a GraphQL POST to /public-resource like
@@ -564,12 +564,22 @@ done
 # E12-S07 changes what is written to disk and nothing else. The forwarded address is load-bearing:
 # it is what a service would have to read if it ever needed one, and this assertion is what stops
 # the story being read as a licence to strip the headers.
-probe POST marketplace-domain.com /public-resource -H "X-Forwarded-For: $CLIENT_IP"
+probe POST marketplace-domain.com /public-resource -H "X-Forwarded-For: $CLIENT_IP" \
+	-H "CF-Connecting-IP: $CLIENT_IP"
 assert_body 'xri=127.0.0.1' 'X-Real-IP still reaches the upstream'
-assert_body "xff=$CLIENT_IP, 127.0.0.1" 'X-Forwarded-For still reaches the upstream'
+assert_body 'xff=127.0.0.1' 'X-Forwarded-For still reaches the upstream'
+
+# E12-S09, and the same probe answers both. The upstream sees the loopback rather than the address
+# the request claimed, twice over: `set_real_ip_from` does not cover 127.0.0.1 on a deployed host,
+# so `CF-Connecting-IP` from an untrusted peer is ignored and `$remote_addr` stays that peer's own
+# address; and `X-Forwarded-For` is now `$remote_addr` rather than the appending form, so the
+# caller's own entry is dropped instead of forwarded.
+assert_no_body "$CLIENT_IP" 'a caller outside set_real_ip_from is not trusted, and its X-Forwarded-For is dropped'
 
 echo
 echo '  --- and again with set_real_ip_from configured, which is the state this format exists for ---'
+# Sorts after conf.d/06-real-ip.conf, which is what makes it an addition to that file's
+# trusted set rather than a replacement for it: `set_real_ip_from` is additive.
 cp /src/test/real-ip-overlay.conf /etc/nginx/conf.d/98-real-ip-overlay.conf
 if nginx -t >/tmp/nginx-t3.out 2>&1; then
 	nginx -s stop 2>/dev/null
@@ -588,6 +598,62 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 		log_probe "$h"
 		assert_log_clean "$h.access.log" "$h — still no address once \$remote_addr is the client"
 	done
+
+	# ------------------------------------------------------------------------------------
+	# E12-S09 — what the zones bucket on, and which zone each endpoint spends.
+	#
+	# Every case claims a different address out of 198.18.0.0/15, the RFC 2544 benchmarking
+	# range, which is routable nowhere. That is not cosmetic: it gives each case a bucket of
+	# its own with no third nginx restart, and the buckets being separate at all is the
+	# assertion that the zones now key on the claimed address rather than on the single peer
+	# every request in this container actually arrives from.
+	# ------------------------------------------------------------------------------------
+	A_ROT=198.18.0.11
+	A_LOGIN=198.18.0.22
+	A_OTHER=198.18.0.33
+
+	codes_as() {   # ADDRESS HOST PATH COUNT — POST COUNT times as that client, echo the codes
+		_out=''
+		_i=0
+		while [ "$_i" -lt "$4" ]; do
+			# shellcheck disable=SC2086
+			_out="$_out $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE \
+				-H "CF-Connecting-IP: $1" "https://$2$3" 2>/dev/null)"
+			_i=$((_i + 1))
+		done
+		echo "$_out"
+	}
+
+	assert_exhausted() {   # ADDRESS HOST PATH LABEL
+		_c=$(codes_as "$1" "$2" "$3" 24)
+		echo "      $4:$_c"
+		case "$_c" in
+			*429*) pass "$4 — 429 once the burst is spent" ;;
+			*)     fail "$4 — no 429 in 24 requests; the zone is not limiting" ;;
+		esac
+		case "$_c" in
+			*200*) pass "$4 — the burst is let through first" ;;
+			*)     fail "$4 — nothing succeeded; the burst is too small to log in with" ;;
+		esac
+	}
+
+	assert_open() {   # ADDRESS HOST PATH LABEL
+		_c=$(codes_as "$1" "$2" "$3" 1)
+		case "$_c" in *200*) pass "$4" ;; *) fail "$4 — got$_c" ;; esac
+	}
+
+	assert_exhausted "$A_ROT" marketplace-domain.com /user-authenticated-authorization \
+		'rotation flood (mkt_refresh 10r/m b20)'
+	assert_open "$A_ROT" marketplace-domain.com /public-authorization \
+		'the same address can still log in — rotation does not spend mkt_auth'
+
+	assert_exhausted "$A_LOGIN" marketplace-domain.com /public-authorization \
+		'login flood    (mkt_auth 1r/m b20)'
+	assert_open "$A_LOGIN" marketplace-domain.com /user-authenticated-authorization \
+		'the same address can still rotate — login does not spend mkt_refresh'
+
+	assert_open "$A_OTHER" marketplace-domain.com /public-authorization \
+		'a second client address has a budget of its own — the zones key on the claimed address'
 else
 	fail 'the real_ip overlay broke the configuration'
 	sed 's/^/        /' /tmp/nginx-t3.out
