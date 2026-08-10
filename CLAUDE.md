@@ -9,7 +9,7 @@ eleven loopback processes. the one way to execute any of it is the throwaway con
 |---|---|
 | what every file holds, the host → path → service → port matrix, install, env assumptions | [`README.md`](./README.md) |
 | the suite and its assertion groups | [`README.md`](./README.md) §Testing it, before it reaches a host |
-| seven nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
+| thirteen nginx traps written out at length | [`README.md`](./README.md) §Things that are easy to get wrong |
 | what is deliberately not built here | [`README.md`](./README.md) §Known gaps |
 | why the `Secure` flag is rewritten at the edge at all | [`README.md`](./README.md) §⚠️ The `Secure` cookie flag lives here |
 | why the edge is a repo of its own, and the port table | [`../docs/architecture.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/architecture.md) §nginx |
@@ -48,11 +48,17 @@ re-including it inside a location works only by accident.
 
 ⚠️ **A rate-limit zone name *is* the counter.** Two locations naming one zone share a single budget per
 address, across vhosts as well as within one. That is why the three login endpoints — all of them
-proxying to the same backend on 4028 — carry three separate zones: `mkt_auth` (customer, 20r/m),
-`mkt_owner_auth` (20r/m) and `mkt_admin_auth` (10r/m, high-privilege and few accounts). nginx cannot
-see which GraphQL mutation the shared process is being asked to run, so the per-vhost hostname is the
-only place those budgets can be told apart. Renaming a zone onto an existing name merges two budgets
-with no error anywhere.
+proxying to the same backend on 4028 — carry three separate zones: `mkt_auth`, `mkt_owner_auth` and
+`mkt_admin_auth`, all three at `rate=1r/m burst=20 nodelay`. nginx cannot see which GraphQL mutation the
+shared process is being asked to run, so the per-vhost hostname is the only place those budgets can be
+told apart. Renaming a zone onto an existing name merges two budgets with no error anywhere.
+
+⚠️ **Rotation and login never share a zone, on any vhost.** `mkt_refresh`, `mkt_owner_refresh` and
+`mkt_admin_refresh` (10r/m, burst 20) exist because they used to (E12-S09), and putting them back
+together breaks two things at once: a token flood spends the login burst and holds the whole address to
+1r/m, and rotation is timer-driven, so an office of fifty sessions rotating twice an hour is ~1.7/min
+sustained and trips a login-sized ceiling with no attacker present. The suite asserts the separation
+behaviourally in both directions.
 
 ⚠️ **Never add `proxy_ignore_headers Set-Cookie`.** nginx's default refusal to cache a response
 carrying `Set-Cookie` is load-bearing on the customer vhost, on top of the `$mkt_user_no_cache` map —
@@ -65,16 +71,51 @@ cached page never carries one visitor's nonce. `location /` therefore forces `Ac
 `sub_filter` cannot rewrite a compressed body. Break either half and the page loads but never
 hydrates, with nothing in the console.
 
+⚠️ **The access logs carry no client address, and one new `access_log` line reopens that.**
+`conf.d/05-logging.conf` defines `log_format mkt_access`, which omits `$remote_addr` and every other
+address variable by the same 2026-08-10 decision that took the address out of the Sentry events
+(E12-S07), and **every** `access_log` directive in the repo names it — all eight server blocks, not
+the three vhosts, because a block that declares none inherits the stock http-level one and that is
+`combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
+none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
+
+⚠️ **All four 443 blocks demand a client certificate, so the origin answers Cloudflare and nobody
+else.** `snippets/origin-pull.conf` (E12-S15) is included at server level four times, not three — the
+`www` redirect is a server block of its own, and a hostname without the include goes on answering anyone
+who knows the origin address. Two consequences to hold on to: a monitoring probe or a `curl --resolve`
+aimed straight at the origin gets `400 Bad Request — No required SSL certificate was sent`, and that is
+the control working, not a fault; and the CA is referenced by path and never committed, so the test
+container generates a throwaway one of its own. The Cloudflare side is **not yet enabled**, so the
+staged `optional` → `on` rollout in `README.md` §Authenticated Origin Pulls is the only safe way to put
+this on a host — reloading straight to `on` first is an outage on all three hostnames.
+
+⚠️ **The error log is a different file and this does not cover it.** nginx builds each error entry
+with a hard-coded `client: <address>` prefix; only the destination and the level are configurable, so
+no `log_format` reaches it and the three vhosts running it at `warn` still write addresses there.
+Which levels emit that prefix in this configuration, and what the retention on those files is, is open
+work — E12-S12 in the parent workspace's `docs/devprotocol/phase5/epics/E12.md` owns it. Do not read
+the access-log format as having closed the question for the whole edge.
+
 - **Ports live in the service `env` templates, not here.** `conf.d/10-upstreams.conf` mirrors
   `grep -m1 '^PORT=' <repo>/env`. Move a port in the template first and here second.
 - **`mkt_logout` on 4030 answering all three vhosts is not a copy-paste slip** — one service serves
   every tier (ADR-005), because its resolver deletes Redis keys by token content.
-- **Every zone keys on `$binary_remote_addr`.** Behind a CDN or a second proxy that becomes the proxy's
-  own address and all visitors share one bucket, until `set_real_ip_from` plus a `$realip`-derived key
-  are configured.
-- **No `/api/register` location and no `mkt_register` zone, deliberately.** The app has no such route,
-  and the real limit is `guardPublicWrite` in `marketplace-dev-public-resource`, per-IP *and*
-  per-email, which no nginx zone can express. Do not add one.
+- **Every zone keys on `$binary_remote_addr`, and `conf.d/06-real-ip.conf` is what makes that a
+  visitor's address.** The zone is proxied by Cloudflare, so without that file the variable is an edge
+  address and each zone buckets a whole point of presence. It reads `CF-Connecting-IP`, never
+  `X-Forwarded-For` — Cloudflare *appends* to a caller-supplied one, so its first entry is whatever the
+  caller wrote, and trusting it hands every attacker a private bucket. ⚠️ **The trusted range list
+  expires silently**: Cloudflare adds ranges, a stale list stops trusting a point of presence, and the
+  only symptom is `$remote_addr` reverting to an edge address for those visitors. Regeneration command
+  at the top of the file; review trigger is risk R43 in the parent workspace.
+- **No `/api/register` location and no `mkt_register` zone, deliberately.** The app has no such route:
+  registration is a GraphQL mutation on the one endpoint the vhost already meters. The limit is split,
+  and each half sits where it can be enforced — **per client address here**, in the zones above, and
+  **per email address in `guardPublicWrite`** (`marketplace-dev-public-resource`), which is the half no
+  zone can express, since a zone keyed on `$binary_remote_addr` never sees the inbox a distributed
+  source is mail-bombing. The services kept a per-address counter of their own until E12-S10 and it was
+  a fiction — `app.proxy` is off, so the address they see is this proxy's and the counter metered the
+  whole platform at once. Do not add a location, and do not expect the backend to bucket callers.
 - **The suite proves configuration, never application behaviour.** All eleven upstreams are canned
   nginx stubs, and the four authorization stubs mint cookies exactly the way koa-utils does today
   (`secure: false`, no `SameSite`) — so anything the suite reports as flagged was flagged by nginx.

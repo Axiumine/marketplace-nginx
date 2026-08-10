@@ -90,10 +90,13 @@ then a second lock on the same door, and the only one a config review can see.
 |File|Level|Role|
 |---|---|---|
 |`conf.d/00-hardening.conf`|http|`server_tokens off`, slow-request timeouts, header buffers|
+|`conf.d/05-logging.conf`|http|`log_format mkt_access` — the one access-log format, and it records no address|
+|`conf.d/06-real-ip.conf`|http|Cloudflare's ranges + `CF-Connecting-IP` — the only place the platform learns a client address|
 |`conf.d/10-upstreams.conf`|http|every backend, one `upstream` each, with keepalive pools|
 |`conf.d/20-rate-limit.conf`|http|`limit_req_zone` / `limit_conn_zone` — per-surface, not shared|
 |`conf.d/30-cache.conf`|http|HTML cache zone and session-bypass map, customer surface only|
 |`conf.d/40-tls.conf`|http|protocols, ciphers, session cache, and the `444` default server|
+|`snippets/origin-pull.conf`|server|mutual TLS — the CA Cloudflare's client certificate is verified against, included by all four 443 blocks|
 |`snippets/proxy-backend.conf`|server|**the `Secure` rewrite**, keepalive, forwarded headers, timeouts|
 |`snippets/security-headers-public.conf`|server/location|customer CSP + headers (nonce, MapLibre, Turnstile)|
 |`snippets/security-headers-private.conf`|server/location|panel CSP + headers — strictly tighter, no nonce, no MapLibre, Turnstile allowed|
@@ -103,8 +106,9 @@ then a second lock on the same door, and the only one a config review can see.
 |`.githooks/pre-commit`|—|the platform secret guard, and nothing after it — no code here to gate|
 |`.githooks/pre-push`|—|the quality gate — runs `test/run.sh`, blocks the push on any failure|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
-|`test/suite.sh`|—|`nginx -t` plus 168 behavioural assertions; runs *inside* the container|
+|`test/suite.sh`|—|`nginx -t` plus 204 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
+|`test/real-ip-overlay.conf`|http|test-only — trusts the loopback so the log assertions run against the post-`set_real_ip_from` shape|
 
 `conf.d/*` must be included at `http` level — `proxy_cache_path`, `limit_req_zone`, `map` and `upstream`
 are not valid inside a `server` block. On Debian, `/etc/nginx/conf.d/*.conf` is already included from
@@ -179,6 +183,186 @@ sudo certbot certonly --webroot -w /var/www/acme -d shopowner.marketplace-domain
 sudo certbot certonly --webroot -w /var/www/acme -d admin.marketplace-domain.com
 ```
 
+## Authenticated Origin Pulls — making the origin accept Cloudflare only
+
+**Configured here, not yet switched on at Cloudflare** (E12-S15). `snippets/origin-pull.conf` is in the
+repo and included by all four 443 blocks, and the suite asserts both directions against a throwaway CA
+it generates itself. What is *not* done is step 2 below — the Cloudflare side — and until it is, this
+configuration must not reach the host: nginx would demand a client certificate that nothing is
+presenting. Read §3 before deploying, and follow the order.
+
+### Why the origin is otherwise open
+
+The zone is Cloudflare-proxied (orange cloud) with the TLS mode on **Full (strict)**. Neither of those
+refuses anybody:
+
+- **Full (strict) is a TLS mode, not an access control.** It encrypts the Cloudflare→origin leg and has
+  Cloudflare validate this origin's certificate. It says nothing about who else may connect.
+- **nginx never declines to serve on the strength of its own certificate.** A TLS server presents what it
+  is configured with; the *client* decides whether to trust it. `curl -k`, `openssl s_client` and every
+  scanner skip that decision. The certificates here are Let's Encrypt in any case — publicly trusted, so a
+  direct connection with the right SNI gets a clean chain and no warning at all.
+
+What *is* already refused is the untargeted half: `ssl_reject_handshake on` in the default server
+(`conf.d/40-tls.conf`) kills the handshake before any certificate is presented when a connection carries
+no SNI or an SNI for a host this instance does not serve. A mass IP scan therefore indexes nothing here
+and this origin is not discoverable that way.
+
+What is not refused is a caller who sets SNI and `Host` to a hostname the edge does serve — and every one
+of those names is public by construction, each Let's Encrypt issuance being recorded in Certificate
+Transparency. That caller reaches the origin directly and skips the WAF, the bot rules and every
+Cloudflare-side rate limit. Authenticated Origin Pulls closes that half and only that half.
+
+It works by making the leg **mutual**: Cloudflare presents a client certificate and nginx verifies it.
+No address list, so nothing to refresh when Cloudflare publishes new ranges.
+
+### Three configurations, and they are not equivalent
+
+| Configuration | Cloudflare side | nginx trusts | Weakness |
+|---|---|---|---|
+| **Zone-level, global certificate** | one dashboard toggle | Cloudflare's shared origin-pull CA | the same certificate is presented for **every Cloudflare customer** — anyone who points their own zone at this origin passes |
+| **Zone-level, own certificate** | API upload + enable | a CA generated here | none; one certificate covers all four server blocks |
+| **Per-hostname, own certificate** | API upload + per-hostname association | a CA generated here | same strength, more lifecycle — one association per hostname, and each is a thing that can be forgotten |
+
+⚠️ **The global certificate stops the internet, not an attacker with a free Cloudflare account.** Take it
+only as an interim step, and pin the identity as well as the issuer if you do — `$ssl_client_s_dn` or
+`$ssl_client_fingerprint` in a `map`, refusing anything that is not the expected value. Verifying the
+issuer alone proves nothing more than "some Cloudflare customer".
+
+There are three hostnames here and all of them want the same answer, so **zone-level with an own
+certificate is the configuration to use**. Per-hostname earns its extra lifecycle only if one hostname
+must stay reachable without Cloudflare, which is not the case here.
+
+### 1. Generate the CA and the client certificate
+
+```bash
+# The CA nginx will trust. Long-lived: replacing it is a coordinated change on both sides.
+openssl genrsa -out origin-pull-ca.key 4096
+openssl req -x509 -new -nodes -key origin-pull-ca.key -sha256 -days 3650 \
+	-subj "/CN=marketplace origin pull CA" -out origin-pull-ca.pem
+
+# The certificate Cloudflare will present. Its expiry is the outage clock — see Renewal below.
+openssl genrsa -out cloudflare-client.key 2048
+openssl req -new -key cloudflare-client.key -subj "/CN=cloudflare-origin-pull" \
+	-out cloudflare-client.csr
+openssl x509 -req -in cloudflare-client.csr -CA origin-pull-ca.pem -CAkey origin-pull-ca.key \
+	-CAcreateserial -days 825 -sha256 -out cloudflare-client.pem
+```
+
+⚠️ **`origin-pull-ca.key` and `cloudflare-client.key` are secrets and never enter this repo.** Generate
+them off the repo tree. `.githooks/pre-commit` matches both `*.pem` and `*.key` paths, so an attempt to
+stage one is refused — the guard and the convention agree, and neither is a reason to relax the other.
+Only `origin-pull-ca.pem` reaches the server, and it goes beside the Let's Encrypt material rather than
+into version control:
+
+```bash
+sudo install -m 644 -o root -g root origin-pull-ca.pem /etc/nginx/certs/origin-pull-ca.pem
+```
+
+### 2. Cloudflare side — enable it **first**
+
+Endpoint paths as of 2026-08; check them against Cloudflare's current API reference before running any
+of this, and read `$CF_API_TOKEN` from your own store rather than pasting it.
+
+**Zone-level, own certificate** — upload the client certificate and its key, then switch the zone on:
+
+```bash
+curl -X POST "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/origin_tls_client_auth" \
+	-H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+	--data "$(jq -n --rawfile c cloudflare-client.pem --rawfile k cloudflare-client.key \
+		'{certificate:$c, private_key:$k}')"
+
+curl -X PUT "https://api.cloudflare.com/client/v4/zones/$ZONE_ID/origin_tls_client_auth/settings" \
+	-H "Authorization: Bearer $CF_API_TOKEN" -H "Content-Type: application/json" \
+	--data '{"enabled": true}'
+```
+
+**Per-hostname, own certificate** — upload against
+`/zones/$ZONE_ID/origin_tls_client_auth/hostnames/certificates`, then associate each hostname via
+`PUT /zones/$ZONE_ID/origin_tls_client_auth/hostnames`. A per-hostname configuration takes precedence
+over the zone-level one for the hostnames it names, so the two can disagree silently: if you use it,
+use it for all three hostnames rather than mixing.
+
+**Zone-level, global certificate** — Dashboard → SSL/TLS → Origin Server → *Authenticated Origin Pulls*.
+Nothing to upload; nginx then trusts the CA Cloudflare publishes in its Authenticated Origin Pulls
+documentation instead of `origin-pull-ca.pem`. Re-read the warning above before choosing this.
+
+### 3. nginx side — stage it on the host, do not go straight to `on`
+
+`snippets/origin-pull.conf` already exists and already reads `on`, because that is the state the repo
+describes and the state the suite asserts:
+
+```nginx
+ssl_client_certificate /etc/nginx/certs/origin-pull-ca.pem;
+ssl_verify_client      on;
+```
+
+It is included at **server level in all four 443 blocks** — the `www` redirect and the apex in
+`sites-available/marketplace-domain.com.conf`, plus the shop-owner and operator vhosts. The `www` block
+is a redirect and easy to skip; skipping it leaves one name that still answers an unauthenticated
+caller, which is exactly the property being removed. `grep -c 'include snippets/origin-pull.conf'` over
+`sites-available/` must read 4, and the suite asserts that count as well as the behaviour.
+
+The default server in `conf.d/40-tls.conf` is **left alone**, and the suite asserts it declares neither
+directive. `ssl_reject_handshake on` refuses earlier in the handshake than client verification runs, so
+adding them there is dead configuration that reads as a second control.
+
+**On the host, edit that one word to `optional` for the first deployment.** Verification is then
+performed but a failure is not fatal, so a Cloudflare side that is not yet presenting anything degrades
+to a log line rather than an outage. Put the result in the access log and watch it:
+
+```nginx
+log_format origin_pull '... $ssl_client_verify $ssl_client_s_dn';
+```
+
+`$ssl_client_verify` reads `SUCCESS` for every request once Cloudflare is presenting the certificate, and
+`NONE` for a connection that presented none. When the log shows `SUCCESS` and nothing else across all
+three hostnames, restore the committed `on` and reload. ⚠️ **That temporary `optional` is a host-local
+edit and must never be committed back** — a repo reading `optional` is a repo whose origin is open,
+which is the condition this whole section exists to remove.
+
+⚠️ **Order is the whole risk here.** Cloudflare presents a client certificate only where the feature is
+switched on. Deploying `ssl_verify_client on` before step 2 means every request to those vhosts fails
+from the moment nginx reloads — a total outage on all three hostnames, presenting as a TLS fault rather
+than as a toggle nobody flipped.
+
+### 4. Verify
+
+```bash
+# Through Cloudflare: must still work.
+curl -sI https://marketplace-domain.com/ | head -1
+
+# Straight at the origin, no client certificate: must not be served.
+curl -sv --resolve marketplace-domain.com:443:<origin-ip> https://marketplace-domain.com/ 2>&1 | tail -5
+```
+
+Two different failures, and both count as a pass:
+
+- **No certificate presented** — the handshake completes and nginx answers
+  `400 Bad Request — No required SSL certificate was sent`.
+- **A certificate from the wrong CA** — OpenSSL aborts during the handshake, and curl reports a TLS
+  alert rather than any HTTP status.
+
+Port 80 is untouched by all of this, so `certbot renew` over HTTP-01 keeps working — the ACME challenge
+is plain HTTP and reaches `/var/www/acme` exactly as before.
+
+### 5. Renewal
+
+⚠️ **`cloudflare-client.pem` expires and nothing renews it.** On that day all four server blocks stop
+accepting Cloudflare and the whole platform is unreachable, with a symptom that looks like a certificate
+problem on the wrong side of the connection. It is not `certbot`'s certificate and `certbot renew` will
+not touch it.
+
+The expiry date, the owner and this procedure are risk **R44** in the parent workspace's
+`docs/devprotocol/phase5/RISK_REGISTER.md`; fill the date in there the day step 1 is run for real, since
+nothing in this repo can know it. Renewing is step 1 for the client certificate only — same CA, new `cloudflare-client.pem` — then
+step 2's upload. The CA and therefore `/etc/nginx/certs/origin-pull-ca.pem` stay as they are, so nginx
+needs no reload.
+
+One consequence worth writing down for whoever operates this: **an uptime probe or health check pointed
+straight at the origin will fail by design** once this is on. Point monitoring at the Cloudflare
+hostname, or give the probe a client certificate of its own signed by the same CA.
+
 ## Testing it, before it reaches a host
 
 ```bash
@@ -216,8 +400,19 @@ hatch precisely because it is conspicuous.
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
 |rate limits|all three login zones — customer, shop owner, operator — let the burst through and then return 429, each out of its own budget|
+|real client address|a `CF-Connecting-IP` from outside `set_real_ip_from` is ignored and the caller's `X-Forwarded-For` never reaches the upstream; from inside it, `$remote_addr` becomes the claimed address, a second address gets a budget of its own, and flooding a rotation zone leaves that address able to log in — and the reverse|
+|origin pulls|all four 443 blocks refuse a caller presenting no client certificate and serve one presenting a certificate from the trusted CA; a certificate from an unrelated CA is refused; `ssl_verify_client` is declared once, the default server has none, and `:80` still completes an ACME challenge with no certificate at all|
+|access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
 
-The rate-limit group runs **last, after a full nginx restart**, and every other endpoint is probed
+The access-logging group runs after the rate-limit one and reloads nginx a second time, with
+`test/real-ip-overlay.conf` trusting the loopback. That overlay exists because the deployed
+`conf.d/06-real-ip.conf` cannot be used here: it trusts Cloudflare's published ranges, the container
+connects from its own loopback, and the real file would therefore leave `$remote_addr` at 127.0.0.1 —
+the second half of the assertions would pass without ever having been exercised. The upstream echoes
+`X-Real-IP` back, and the suite asserts it has become the client address before believing anything the
+log assertions say.
+
+The rate-limit group runs **after everything except that, and after a full nginx restart**, and every other endpoint is probed
 exactly once. `limit_req` counters live in shared memory: they survive a reload, and a suite that spent
 the budget early would fail the endpoints it tested afterwards for the wrong reason.
 
@@ -260,8 +455,10 @@ knowing; neither is visible to `nginx -t` and neither is visible by reading the 
    `userRegister` mutation. **No `/api/*` route has ever existed in `marketplace-user/src/routes/`**, so
    both blocks matched paths the renderer answers with a 404 and the zone metered nothing. Deleted rather
    than built: the Turnstile secret is already server-side in `marketplace-dev-public-resource` and always
-   was, and registration is already limited there by `guardPublicWrite` — two Redis counters per hour, per
-   IP *and per email address*, the second of which no `$binary_remote_addr` zone can express. Building the
+   was, and registration is already limited there by `guardPublicWrite` — one Redis counter per hour *per
+   email address*, which no `$binary_remote_addr` zone can express (the per-address half is this repo's,
+   and the service's own copy of it was removed by E12-S10 as a counter that metered nothing but nginx).
+   Building the
    route would have pushed plaintext passwords through a second process to weaken both controls. The apex
    vhost and `conf.d/20-rate-limit.conf` each carry the reasoning where the block used to be.
 
@@ -349,10 +546,45 @@ grounds that nginx is handling it — and never turn SSR on for an `/account` ro
 panels have zones of their own for exactly that reason; renaming one to reuse another's merges them
 back.
 
-**All zones key on `$binary_remote_addr`, and so do the commented-out allow-lists.** Behind a CDN or a
-second proxy that is the proxy's address: every visitor shares one bucket and an allow-list allows the
-whole internet. Configure `set_real_ip_from` and switch the key before putting anything in front of
-this.
+**All zones key on `$binary_remote_addr`, and so do the commented-out allow-lists — which means they
+key on whatever `conf.d/06-real-ip.conf` last said to trust.** Delete that file and every visitor
+shares one bucket per Cloudflare point of presence and an allow-list allows the whole internet; widen
+`set_real_ip_from` past Cloudflare's ranges and any caller can claim any address by setting one header.
+The list in it is a vendored copy of `cloudflare.com/ips-v4` and `ips-v6` with the fetch date and the
+regeneration command at the top, and it expires without failing: a range Cloudflare added after that
+date is simply not trusted, and the only symptom is those visitors metering as an edge address again.
+
+**Read `CF-Connecting-IP`, never `X-Forwarded-For`.** Cloudflare appends to a caller-supplied
+`X-Forwarded-For` rather than replacing it, so its first entry is attacker-controlled; a limiter keyed
+on it gives every attacker a private bucket, which is worse than the shared one. `CF-Connecting-IP` is
+single-valued and overwritten unconditionally, and `real_ip_recursive` is `off` because a single-valued
+header has no chain to walk.
+
+**An `access_log` with no format name is not a default, it is `combined` — and so is declaring none at
+all.** `conf.d/05-logging.conf` defines `mkt_access`, which records no address of any kind, and all
+eight server blocks name it. A server block that declares no `access_log` inherits the stock http-level
+one instead, which is why the three `:80` redirects, the `www` redirect and the `444` default server
+each carry the line rather than only the three vhosts. And an http-level `access_log` here would not
+fix that: `access_log` is additive at the same level, so the stock one would keep writing alongside it.
+Today the address in those lines would be a Cloudflare edge address; `conf.d/06-real-ip.conf` turns it
+into a visitor's, with nothing in that diff to say so.
+
+**`snippets/origin-pull.conf` goes in four server blocks, and a vhost count says three.** The `www`
+redirect in `sites-available/marketplace-domain.com.conf` is a server block of its own; leaving it out
+leaves one hostname answering any caller, which is the whole property the snippet removes. The default
+server in `conf.d/40-tls.conf` is the mirror-image mistake: `ssl_reject_handshake on` refuses earlier in
+the handshake than client verification runs, so adding the directives there is dead configuration that
+reads as a control. The suite asserts the count, the single `ssl_verify_client` declaration and the
+default server's absence from it.
+
+**The origin now answers Cloudflare and nothing else, which includes your monitoring.** An uptime probe
+or health check pointed straight at the origin address fails by design once this is enabled on the
+Cloudflare side. Point it at the hostname, or issue it a client certificate from the same CA. The same
+goes for anyone debugging with `curl --resolve` — the `400 Bad Request` is the control working.
+
+**The `error_log` is a separate file that none of this reaches.** nginx hard-codes a `client: <address>`
+prefix into every error entry and exposes no format for it — only the destination and the level. The
+access-log format is not a property of the edge as a whole.
 
 ## Known gaps, stated so they are not read as oversights
 

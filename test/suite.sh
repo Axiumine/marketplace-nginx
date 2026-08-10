@@ -28,6 +28,30 @@ for h in $HOSTS; do
 		-subj "/CN=$h" >/dev/null 2>&1
 done
 
+# Authenticated Origin Pulls (E12-S15). `snippets/origin-pull.conf` trusts a CA by path that is
+# never committed, so the suite generates a throwaway one where the snippet expects it. Cloudflare's
+# own key is not available to a test and never will be; what is testable is the property that
+# matters — nginx refuses a caller without a certificate from that CA, and serves one with it.
+mkdir -p /etc/nginx/certs
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=marketplace origin pull test CA' \
+	-keyout /tmp/origin-pull-ca.key -out /etc/nginx/certs/origin-pull-ca.pem >/dev/null 2>&1
+
+issue_client() {   # NAME CA-CERT CA-KEY — a client certificate signed by that CA
+	openssl req -new -newkey rsa:2048 -nodes -subj '/CN=cloudflare-origin-pull' \
+		-keyout "/tmp/$1.key" -out "/tmp/$1.csr" >/dev/null 2>&1
+	openssl x509 -req -in "/tmp/$1.csr" -CA "$2" -CAkey "$3" -CAcreateserial -days 1 -sha256 \
+		-out "/tmp/$1.crt" >/dev/null 2>&1
+}
+
+issue_client cf-client /etc/nginx/certs/origin-pull-ca.pem /tmp/origin-pull-ca.key
+
+# ⚠️ A second, unrelated CA. "Signed by somebody" must not be enough — that is the whole argument
+# against Cloudflare's shared global origin-pull certificate, which every Cloudflare customer is
+# handed. See README.md §Three configurations.
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=rogue CA' \
+	-keyout /tmp/rogue-ca.key -out /tmp/rogue-ca.crt >/dev/null 2>&1
+issue_client rogue /tmp/rogue-ca.crt /tmp/rogue-ca.key
+
 mkdir -p /etc/nginx/snippets /etc/nginx/sites-enabled
 cp /src/conf.d/*.conf          /etc/nginx/conf.d/
 cp /src/snippets/*.conf        /etc/nginx/snippets/
@@ -118,6 +142,11 @@ RESOLVE="--resolve marketplace-domain.com:443:127.0.0.1
 # shellcheck disable=SC2086
 RESOLVE=$(echo $RESOLVE)
 
+# ⚠️ Every https request in this suite presents Cloudflare's stand-in certificate, because
+# `ssl_verify_client on` is what all four 443 blocks now do. The `:80` requests deliberately do
+# not, which is what keeps proving that ACME renewal is untouched by it.
+CLIENT='--cert /tmp/cf-client.crt --key /tmp/cf-client.key'
+
 HDR=/tmp/probe.hdr
 BODY=/tmp/probe.body
 
@@ -133,7 +162,7 @@ probe() {
 	_p=$3
 	shift 3
 	# shellcheck disable=SC2086
-	curl -sk -X "$_m" -o "$BODY" -D "$HDR".raw $RESOLVE "$@" "https://$_h$_p" 2>/dev/null
+	curl -sk -X "$_m" -o "$BODY" -D "$HDR".raw $RESOLVE $CLIENT "$@" "https://$_h$_p" 2>/dev/null
 	tr -d '\r' <"$HDR".raw >"$HDR"
 }
 
@@ -415,6 +444,70 @@ _code=$(curl -sk -o /dev/null -w '%{http_code}' --resolve nothing.marketplace-do
 
 echo
 echo '==================================================================='
+echo ' Authenticated Origin Pulls — only Cloudflare opens a connection'
+echo '==================================================================='
+
+# Static half. Four includes, not three: a vhost count leaves out the `www` redirect, which is a
+# server block of its own and would go on answering an unauthenticated caller.
+_inc=$(grep -h -c 'include snippets/origin-pull.conf;' /src/sites-available/*.conf | awk '{s+=$1} END {print s}')
+[ "$_inc" = 4 ] && pass 'origin-pull.conf is included by all four 443 blocks' ||
+	fail "origin-pull.conf is included $_inc time(s), expected 4"
+
+_def=$(grep -rl 'ssl_verify_client' /src/conf.d /src/snippets /src/sites-available | wc -l)
+[ "$_def" = 1 ] && pass 'ssl_verify_client is declared in exactly one file' ||
+	fail "ssl_verify_client is declared in $_def files — it belongs in the snippet only"
+
+# ⚠️ The default server is left alone on purpose. `ssl_reject_handshake on` refuses earlier in the
+# handshake than client verification runs, so these directives there are dead configuration that
+# reads as a second control.
+if grep -q 'ssl_verify_client\|ssl_client_certificate' /src/conf.d/40-tls.conf; then
+	fail 'the default server declares client verification — dead configuration, ssl_reject_handshake is earlier'
+else
+	pass 'the default server block is untouched'
+fi
+
+# Behavioural half. Four names, because there are four 443 blocks.
+TLS_HOSTS='marketplace-domain.com www.marketplace-domain.com shopowner.marketplace-domain.com admin.marketplace-domain.com'
+
+for h in $TLS_HOSTS; do
+	# shellcheck disable=SC2086
+	_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE "https://$h/" 2>/dev/null)
+	[ "$_c" = 400 ] && pass "$h refuses a caller presenting no client certificate → 400" ||
+		fail "$h served a caller presenting no client certificate → $_c"
+done
+
+for h in $TLS_HOSTS; do
+	# shellcheck disable=SC2086
+	_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE $CLIENT "https://$h/" 2>/dev/null)
+	case "$_c" in
+		200|308) pass "$h serves a certificate signed by the trusted CA → $_c" ;;
+		*)       fail "$h refused the trusted client certificate → $_c" ;;
+	esac
+done
+
+# ⚠️ Issuer, not merely "a certificate". Cloudflare's shared global origin-pull certificate is
+# handed to every Cloudflare customer, so trusting that CA would admit anyone willing to open a
+# free account and point their own zone here.
+# shellcheck disable=SC2086
+_c=$(curl -sk -o /dev/null -w '%{http_code}' $RESOLVE --cert /tmp/rogue.crt --key /tmp/rogue.key \
+	"https://marketplace-domain.com/" 2>/dev/null)
+case "$_c" in
+	200|308) fail "a certificate from an unrelated CA was accepted → $_c" ;;
+	*)       pass "a certificate from an unrelated CA is refused → ${_c:-handshake aborted}" ;;
+esac
+
+# ⚠️ Port 80 carries no client verification and must not: an ACME HTTP-01 renewal presents no
+# certificate, and breaking it would take the TLS material down with it a few weeks later. The
+# ACME assertions above already run without $CLIENT; this is the same property stated where
+# somebody adding a directive to the `:80` blocks will read it.
+curl -s -o "$BODY" -D "$HDR".raw --resolve "marketplace-domain.com:80:127.0.0.1" \
+	"http://marketplace-domain.com/.well-known/acme-challenge/probe-token" 2>/dev/null
+tr -d '\r' <"$HDR".raw >"$HDR"
+[ "$(status)" = 200 ] && pass 'ACME on :80 still completes with no client certificate' ||
+	fail "ACME on :80 → $(status) with no client certificate; certbot renewal would fail"
+
+echo
+echo '==================================================================='
 echo ' Panel hardening'
 echo '==================================================================='
 for h in shopowner.marketplace-domain.com admin.marketplace-domain.com; do
@@ -449,7 +542,7 @@ burst_probe() {   # HOST PATH COUNT LABEL
 	_i=0
 	while [ "$_i" -lt "$3" ]; do
 		# shellcheck disable=SC2086
-		_codes="$_codes $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE "https://$1$2" 2>/dev/null)"
+		_codes="$_codes $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE $CLIENT "https://$1$2" 2>/dev/null)"
 		_i=$((_i + 1))
 	done
 	echo "      $4:$_codes"
@@ -463,13 +556,13 @@ burst_probe() {   # HOST PATH COUNT LABEL
 	esac
 }
 
-burst_probe admin.marketplace-domain.com     /public-authorization 12 'operator login  (mkt_admin_auth 10r/m)'
-burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 20r/m)'
+burst_probe admin.marketplace-domain.com     /public-authorization 24 'operator login  (mkt_admin_auth 1r/m b20)'
+burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 1r/m b20)'
 # The customer surface's own login zone. The two probes above are on the panel hostnames and spend
 # `mkt_owner_auth` / `mkt_admin_auth`; `mkt_auth` is a third, separate budget reached only through
 # the apex — which is the whole point of giving the three logins zones of their own, since they all
 # land on the same service (public-authorization, 4028).
-burst_probe marketplace-domain.com           /public-authorization 24 'customer login  (mkt_auth 20r/m)'
+burst_probe marketplace-domain.com           /public-authorization 24 'customer login  (mkt_auth 1r/m b20)'
 
 # ⚠️ There is deliberately no registration burst test, because there is no `mkt_register` zone to
 # test and no `/api/register` to aim one at. Registration is a GraphQL POST to /public-resource like
@@ -477,6 +570,191 @@ burst_probe marketplace-domain.com           /public-authorization 24 'customer 
 # marketplace-dev-public-resource by `guardPublicWrite` — two Redis counters per hour, per IP *and*
 # per email address. The per-email half is what actually stops a mail-bomb and no nginx zone keyed
 # on $binary_remote_addr can express it. See the comments in 20-rate-limit.conf and the apex vhost.
+
+# --------------------------------------------------------------------------------------
+# Access logging — E12-S07. Last in the run, because its second half reloads nginx with
+# `set_real_ip_from` pointed at the loopback, which changes the key every rate-limit zone
+# buckets on and would quietly invalidate the section above it.
+# --------------------------------------------------------------------------------------
+echo
+echo '==================================================================='
+echo ' Access logs carry no client address'
+echo '==================================================================='
+
+# RFC 5737 documentation addresses rather than plausible ones: a line that leaks either is
+# unmistakable in this output, and neither can collide with anything the container itself uses.
+CLIENT_IP=203.0.113.77
+HOP_IP=198.51.100.9
+
+# The static half — the format itself. This is the grep a reviewer runs; keeping it here means a
+# variable added to the format later fails a run rather than waiting for the next review.
+FMT=$(sed -n '/^log_format/,/;/p' /src/conf.d/05-logging.conf)
+_bad=''
+for _v in '$remote_addr' '$binary_remote_addr' '$realip_remote_addr' '$http_x_forwarded_for' \
+	'$proxy_add_x_forwarded_for' '$http_x_real_ip'; do
+	case "$FMT" in *"$_v"*) _bad="$_bad $_v" ;; esac
+done
+[ -z "$_bad" ] && pass 'log_format mkt_access names no address variable' ||
+	fail "log_format mkt_access names$_bad"
+
+# The other direction, and it is not decoration: a format that logs nothing is trivially clean and
+# gets reverted the first time somebody has to debug from it, which loses the property above too.
+_missing=''
+for _v in '$time_iso8601' '$host' '$request' '$status' '$body_bytes_sent' '$http_referer' \
+	'$http_user_agent' '$request_time' '$upstream_response_time'; do
+	case "$FMT" in *"$_v"*) ;; *) _missing="$_missing $_v" ;; esac
+done
+[ -z "$_missing" ] && pass 'log_format mkt_access keeps everything not derived from the network' ||
+	fail "log_format mkt_access dropped$_missing"
+
+# An `access_log` with no format name means the built-in `combined`, and so does a server block
+# that declares none at all and inherits the stock http-level one. Both start with the address, so
+# one new vhost written from the old template reopens this with nothing to see in the diff.
+_unnamed=$(grep -rn '^[[:space:]]*access_log[[:space:]]' /src/conf.d /src/sites-available /src/snippets |
+	grep -v '[[:space:]]off;' | grep -v 'mkt_access;')
+if [ -z "$_unnamed" ]; then
+	pass 'every access_log directive in the repo names its format'
+else
+	fail 'access_log with no format name — that is the built-in combined:'
+	echo "$_unnamed" | sed 's/^/        /'
+fi
+
+# assert_log_clean FILE LABEL — the newest line must exist, and contain no address in any form.
+# ⚠️ The empty check is not a formality. "This address does not appear" is satisfied by a line
+# that was never written, so without it the whole section passes on a broken log path — and would
+# have passed before this story existed.
+assert_log_clean() {
+	_line=$(tail -1 "/var/log/nginx/$1")
+	if [ -z "$_line" ]; then
+		fail "$2 — nothing was logged at all, so the address assertion never ran"
+		return
+	fi
+	_hit=''
+	for _a in "$CLIENT_IP" "$HOP_IP" 127.0.0.1; do
+		case "$_line" in *"$_a"*) _hit="$_hit $_a" ;; esac
+	done
+	if [ -n "$_hit" ]; then
+		fail "$2 — address(es)$_hit in: $_line"
+	else
+		pass "$2"
+		echo "        $_line"
+	fi
+}
+
+# ⚠️ The request has to arrive the way Cloudflare sends it. Asserting no address appears in the
+# log of a request that carried none proves nothing at all.
+log_probe() {   # HOST
+	: >"/var/log/nginx/$1.access.log"
+	probe GET "$1" / -H "CF-Connecting-IP: $CLIENT_IP" -H "X-Forwarded-For: $CLIENT_IP, $HOP_IP"
+}
+
+for h in $HOSTS; do
+	log_probe "$h"
+	assert_status 200 "$h answered the logged request"
+	assert_log_clean "$h.access.log" "$h — no address in the access log"
+done
+
+# E12-S07 changes what is written to disk and nothing else. The forwarded address is load-bearing:
+# it is what a service would have to read if it ever needed one, and this assertion is what stops
+# the story being read as a licence to strip the headers.
+probe POST marketplace-domain.com /public-resource -H "X-Forwarded-For: $CLIENT_IP" \
+	-H "CF-Connecting-IP: $CLIENT_IP"
+assert_body 'xri=127.0.0.1' 'X-Real-IP still reaches the upstream'
+assert_body 'xff=127.0.0.1' 'X-Forwarded-For still reaches the upstream'
+
+# E12-S09, and the same probe answers both. The upstream sees the loopback rather than the address
+# the request claimed, twice over: `set_real_ip_from` does not cover 127.0.0.1 on a deployed host,
+# so `CF-Connecting-IP` from an untrusted peer is ignored and `$remote_addr` stays that peer's own
+# address; and `X-Forwarded-For` is now `$remote_addr` rather than the appending form, so the
+# caller's own entry is dropped instead of forwarded.
+assert_no_body "$CLIENT_IP" 'a caller outside set_real_ip_from is not trusted, and its X-Forwarded-For is dropped'
+
+echo
+echo '  --- and again with set_real_ip_from configured, which is the state this format exists for ---'
+# Sorts after conf.d/06-real-ip.conf, which is what makes it an addition to that file's
+# trusted set rather than a replacement for it: `set_real_ip_from` is additive.
+cp /src/test/real-ip-overlay.conf /etc/nginx/conf.d/98-real-ip-overlay.conf
+if nginx -t >/tmp/nginx-t3.out 2>&1; then
+	nginx -s stop 2>/dev/null
+	sleep 1
+	nginx
+	sleep 1
+
+	# Prove the overlay took effect before believing anything below it. `X-Real-IP` is
+	# `$remote_addr`, so the upstream echoing the client address is the realip module having
+	# rewritten it — without this check the three assertions that follow pass on a run in which
+	# nothing changed, which is exactly the failure this half exists to rule out.
+	probe POST marketplace-domain.com /public-resource -H "CF-Connecting-IP: $CLIENT_IP"
+	assert_body "xri=$CLIENT_IP" 'set_real_ip_from took effect — $remote_addr is now the client'
+
+	for h in $HOSTS; do
+		log_probe "$h"
+		assert_log_clean "$h.access.log" "$h — still no address once \$remote_addr is the client"
+	done
+
+	# ------------------------------------------------------------------------------------
+	# E12-S09 — what the zones bucket on, and which zone each endpoint spends.
+	#
+	# Every case claims a different address out of 198.18.0.0/15, the RFC 2544 benchmarking
+	# range, which is routable nowhere. That is not cosmetic: it gives each case a bucket of
+	# its own with no third nginx restart, and the buckets being separate at all is the
+	# assertion that the zones now key on the claimed address rather than on the single peer
+	# every request in this container actually arrives from.
+	# ------------------------------------------------------------------------------------
+	A_ROT=198.18.0.11
+	A_LOGIN=198.18.0.22
+	A_OTHER=198.18.0.33
+
+	codes_as() {   # ADDRESS HOST PATH COUNT — POST COUNT times as that client, echo the codes
+		_out=''
+		_i=0
+		while [ "$_i" -lt "$4" ]; do
+			# shellcheck disable=SC2086
+			_out="$_out $(curl -sk -o /dev/null -w '%{http_code}' -X POST $RESOLVE $CLIENT \
+				-H "CF-Connecting-IP: $1" "https://$2$3" 2>/dev/null)"
+			_i=$((_i + 1))
+		done
+		echo "$_out"
+	}
+
+	assert_exhausted() {   # ADDRESS HOST PATH LABEL
+		_c=$(codes_as "$1" "$2" "$3" 24)
+		echo "      $4:$_c"
+		case "$_c" in
+			*429*) pass "$4 — 429 once the burst is spent" ;;
+			*)     fail "$4 — no 429 in 24 requests; the zone is not limiting" ;;
+		esac
+		case "$_c" in
+			*200*) pass "$4 — the burst is let through first" ;;
+			*)     fail "$4 — nothing succeeded; the burst is too small to log in with" ;;
+		esac
+	}
+
+	assert_open() {   # ADDRESS HOST PATH LABEL
+		_c=$(codes_as "$1" "$2" "$3" 1)
+		case "$_c" in *200*) pass "$4" ;; *) fail "$4 — got$_c" ;; esac
+	}
+
+	assert_exhausted "$A_ROT" marketplace-domain.com /user-authenticated-authorization \
+		'rotation flood (mkt_refresh 10r/m b20)'
+	assert_open "$A_ROT" marketplace-domain.com /public-authorization \
+		'the same address can still log in — rotation does not spend mkt_auth'
+
+	assert_exhausted "$A_LOGIN" marketplace-domain.com /public-authorization \
+		'login flood    (mkt_auth 1r/m b20)'
+	assert_open "$A_LOGIN" marketplace-domain.com /user-authenticated-authorization \
+		'the same address can still rotate — login does not spend mkt_refresh'
+
+	assert_open "$A_OTHER" marketplace-domain.com /public-authorization \
+		'a second client address has a budget of its own — the zones key on the claimed address'
+else
+	fail 'the real_ip overlay broke the configuration'
+	sed 's/^/        /' /tmp/nginx-t3.out
+fi
+
+# ⚠️ Nothing above touches the error log, and nothing can: nginx builds each entry with a
+# hard-coded `client: <address>` prefix and no `log_format` reaches it. See conf.d/05-logging.conf
+# and E12-S12, which owns the residue.
 
 echo
 echo '==================================================================='
