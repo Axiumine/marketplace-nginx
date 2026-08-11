@@ -79,6 +79,17 @@ the three vhosts, because a block that declares none inherits the stock http-lev
 `combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
 none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
 
+⚠️ **The same format names no `$request` and no `$http_referer` either, and both omissions are
+controls.** Four mailed links carry `:email/:hash` in the path — `/check/verify-email-user/`,
+`/check/verify-email/`, `/reset-password/` and `/x/reset/` — so the raw request line is an account
+address next to a live one-time hash (E12-S16). The request line is rebuilt from `$request_method`,
+`$request_uri` through a `map`, and `$server_protocol`; the referer goes through a second map, because
+`strict-origin-when-cross-origin` on the customer surface sends the full URL on same-origin requests
+and the reset page's own calls would carry the link. ⚠️ **Only two of the four have a `location` block
+of their own** — the other two are an SSR route and a SPA fallback — which is why the redaction is at
+http level on the logged value and must stay there. Restoring `$request` for readability puts every
+one of them back.
+
 ⚠️ **All four 443 blocks demand a client certificate, so the origin answers Cloudflare and nobody
 else.** `snippets/origin-pull.conf` (E12-S15) is included at server level four times, not three — the
 `www` redirect is a server block of its own, and a hostname without the include goes on answering anyone
