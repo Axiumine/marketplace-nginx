@@ -94,7 +94,7 @@ then a second lock on the same door, and the only one a config review can see.
 |`conf.d/06-real-ip.conf`|http|Cloudflare's ranges + `CF-Connecting-IP` — the only place the platform learns a client address|
 |`conf.d/10-upstreams.conf`|http|every backend, one `upstream` each, with keepalive pools|
 |`conf.d/20-rate-limit.conf`|http|`limit_req_zone` / `limit_conn_zone` — per-surface, not shared|
-|`conf.d/30-cache.conf`|http|HTML cache zone and session-bypass map, customer surface only|
+|`conf.d/30-cache.conf`|http|HTML cache zone, session-bypass map and mailed-credential bypass map, customer surface only|
 |`conf.d/40-tls.conf`|http|protocols, ciphers, session cache, and the `444` default server|
 |`snippets/origin-pull.conf`|server|mutual TLS — the CA Cloudflare's client certificate is verified against, included by all four 443 blocks|
 |`snippets/proxy-backend.conf`|server|**the `Secure` rewrite**, keepalive, forwarded headers, timeouts|
@@ -395,7 +395,7 @@ hatch precisely because it is conspicuous.
 |proxy headers|`X-Forwarded-Proto: https` and the original `Host` survive the hop|
 |CSP nonce|the nonce in the delivered HTML equals the one in the header, on a cache MISS **and** a HIT|
 |security headers|every location that sets an `add_header` of its own still ships the full policy|
-|SSR cache|MISS → HIT → BYPASS with a session, and the session response is never stored|
+|SSR cache|MISS → HIT → BYPASS with a session, and the session response is never stored; a URL carrying a mailed `:email/:hash` credential is BYPASS on the first visit and on the second — never a HIT off its own key — while an ordinary page still goes MISS → HIT, which is what stops a too-greedy bypass regex from turning the cache off unnoticed|
 |server hardening|`Server:` carries no version on any host; the two token endpoints are **not** compressed while `/assets/` is, checked against a body large enough for the difference to mean something|
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
@@ -495,6 +495,10 @@ curl -sI https://marketplace-domain.com/shops | grep -i x-cache-status   # HIT
 curl -sI -H 'Cookie: refresh_token=whatever' https://marketplace-domain.com/shops \
 	| grep -i x-cache-status                                              # BYPASS
 
+# nor must a mailed link, whose URL *is* the credential — anonymous, so the cookie map sees nothing
+curl -sI 'https://marketplace-domain.com/reset-password/someone%40example.com/HASH' \
+	| grep -i x-cache-status                                              # BYPASS
+
 # the HTML must contain the metadata, not a JS bundle that will add it later
 curl -s https://marketplace-domain.com/shop/<slug> | grep -E '<title>|rel="canonical"|application/ld\+json'
 
@@ -538,6 +542,16 @@ silently stops matching and the pages break on HITs only.
 **`proxy_cache_bypass` and `proxy_no_cache` are different directives and the customer vhost needs
 both.** The first skips the *lookup*; the second skips the *store*. With only the first, a logged-in
 customer's personalised HTML is fetched fresh and then saved for the next anonymous visitor.
+
+**Both of them read *two* variables, and the second one is not about the visitor.** `proxy_cache_key` is
+the full request URI, so a mailed `/reset-password/:email/:hash` link becomes a file under
+`/var/cache/nginx/marketplace-user/` whose header holds an account address next to a live one-time hash —
+kept up to `inactive=24h`, which is the lifetime, not the 60s of `proxy_cache_valid`, and in a directory
+nothing rotates and nothing shreds. ⚠️ **The cookie map cannot catch it**: that route has no `location`
+block of its own and whoever follows a reset link is anonymous by definition, so `$mkt_user_no_cache` is 0
+for exactly the request that must not be stored. `$mkt_credential_uri` (E12-S26) is the URL test beside
+it, matching the same four prefixes `conf.d/05-logging.conf` redacts — the log and the cache have to agree
+about which links carry a credential, and the suite fails if the two lists drift.
 
 **The private areas are client-rendered, so they never produce cacheable HTML in the first place.** The
 bypass map is the second line of defence, not the first. Do not weaken the app's rendering split on the

@@ -404,6 +404,37 @@ assert_header x-cache-status 'BYPASS' 'request with a session   → BYPASS (skip
 probe GET marketplace-domain.com /cache-probe-b
 assert_header x-cache-status 'MISS' 'the session response was never stored (proxy_no_cache)'
 
+# The mailed-link credential. Defined once and used by two sections — the cache must never store
+# a URL carrying it (E12-S26, below) and the log must never record one (E12-S16, further down) —
+# so the two cannot drift onto different probe values and each pass against the other's.
+LINK_EMAIL='probe@example.invalid'
+LINK_EMAIL_ENC='probe%40example.invalid'
+LINK_HASH='MKTS16LIVEONETIMEHASH0000'
+
+echo
+echo '  --- and never a URL that carries a mailed one-time credential (E12-S26) ---'
+# ⚠️ The cookie map cannot reach this case. `/reset-password/:email/:hash` has no `location` block
+# — it is an SSR route served through `location /` — and whoever follows a reset link is anonymous
+# by definition, so `$mkt_user_no_cache` is 0 for exactly the request that must never be stored.
+# Without `$mkt_credential_uri` the address and the live hash become a cache key on disk, kept up
+# to `inactive=24h`, in a directory nothing rotates and nothing shreds.
+probe GET marketplace-domain.com "/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'anonymous reset link     → BYPASS (never becomes a cache key)'
+probe GET marketplace-domain.com "/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'and on the second visit  → BYPASS, not a HIT off the first'
+
+# The decoded form, and the shape koa-utils sends when nothing overrides its default `linkPath`.
+# Both reach `location /` on the apex the same way the SSR route does.
+probe GET marketplace-domain.com "/x/reset/$LINK_EMAIL/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'apex /x/reset/ decoded @ → BYPASS'
+
+# The other direction. A bypass keyed on the URL is one bad regex away from bypassing everything,
+# which turns the cache off in production with every assertion above still green.
+probe GET marketplace-domain.com /cache-probe-c
+assert_header x-cache-status 'MISS' 'an ordinary page is still cacheable → MISS'
+probe GET marketplace-domain.com /cache-probe-c
+assert_header x-cache-status 'HIT'  'and still served from the cache     → HIT'
+
 echo
 echo '==================================================================='
 echo ' TLS termination and redirects'
@@ -631,6 +662,18 @@ for _m in mkt_uri mkt_referer; do
 		fail "\$$_m has no map — the format names a variable nothing redacts"
 done
 
+# E12-S26 — a third map, in conf.d/30-cache.conf, matches the same four prefixes and stops the edge
+# STORING what these two stop it LOGGING. Two regexes over one list, because the redaction map needs
+# a named capture to rebuild the flow name and the cache map only needs a yes. Asserted as a literal
+# string on purpose: a fifth mailed link added to one file and not the other would otherwise be
+# redacted in the log while sitting in /var/cache/nginx/ in full, and nothing would say so.
+_alt='check/verify-email-user|check/verify-email|reset-password|x/reset'
+for _f in 05-logging.conf 30-cache.conf; do
+	grep -qF "$_alt" "/src/conf.d/$_f" &&
+		pass "conf.d/$_f matches all four mailed-link prefixes" ||
+		fail "conf.d/$_f no longer carries '$_alt' — the redaction and the cache bypass have drifted"
+done
+
 # An `access_log` with no format name means the built-in `combined`, and so does a server block
 # that declares none at all and inherits the stock http-level one. Both start with the address, so
 # one new vhost written from the old template reopens this with nothing to see in the diff.
@@ -683,10 +726,9 @@ echo '  --- and no account address or one-time hash either (E12-S16) ---'
 
 # The four mailed links, driven as a mail client follows them. Two are the encoded form koa-utils
 # actually sends (`encodeURI` turns `@` into `%40`), two the decoded form, because a client that
-# normalises the URL must not walk out of the redaction.
-LINK_EMAIL='probe@example.invalid'
-LINK_EMAIL_ENC='probe%40example.invalid'
-LINK_HASH='MKTS16LIVEONETIMEHASH0000'
+# normalises the URL must not walk out of the redaction. `LINK_EMAIL`, `LINK_EMAIL_ENC` and
+# `LINK_HASH` are defined once, up in the SSR cache section, which asserts the other half of the
+# same problem: the log must not record these values and the cache must not store them.
 
 # assert_log_redacted FILE EXPECTED LABEL — the newest line must exist, must carry EXPECTED, and
 # must hold neither half of the credential in either encoding. EXPECTED is not decoration: a format

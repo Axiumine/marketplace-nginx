@@ -65,6 +65,16 @@ carrying `Set-Cookie` is load-bearing on the customer vhost, on top of the `$mkt
 and that map only works while the `refresh_token` cookie stays root-path-scoped, so narrowing its path
 in koa-utils would serve one logged-in customer's HTML to everybody.
 
+⚠️ **The cache bypass reads two variables and only one of them is about the visitor.**
+`proxy_cache_key` is the full request URI, so a mailed `:email/:hash` link cached by `location /` is a
+file whose header holds the account address beside a live one-time hash, kept for `inactive=24h` rather
+than the 60s of `proxy_cache_valid`, in a directory nothing rotates. `$mkt_user_no_cache` never sees it —
+that route has no `location` of its own and the visitor following a reset link is anonymous — so
+`$mkt_credential_uri` in `conf.d/30-cache.conf` is the URL test beside it (E12-S26). It matches the same
+four prefixes the logging maps redact, deliberately duplicated because that map needs a named capture and
+this one needs a yes; the suite asserts both files still carry the list, since a fifth link added to one
+of them would be redacted in the log and stored on disk in full.
+
 ⚠️ **The `__CSP_NONCE__` contract spans two repos.** The SSR renderer writes that literal placeholder
 into its inline script tags and nginx substitutes the per-request `$csp_nonce` on the way out, so a
 cached page never carries one visitor's nonce. `location /` therefore forces `Accept-Encoding ""` —
