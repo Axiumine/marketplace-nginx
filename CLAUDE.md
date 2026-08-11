@@ -65,6 +65,16 @@ carrying `Set-Cookie` is load-bearing on the customer vhost, on top of the `$mkt
 and that map only works while the `refresh_token` cookie stays root-path-scoped, so narrowing its path
 in koa-utils would serve one logged-in customer's HTML to everybody.
 
+⚠️ **The cache bypass reads two variables and only one of them is about the visitor.**
+`proxy_cache_key` is the full request URI, so a mailed `:email/:hash` link cached by `location /` is a
+file whose header holds the account address beside a live one-time hash, kept for `inactive=24h` rather
+than the 60s of `proxy_cache_valid`, in a directory nothing rotates. `$mkt_user_no_cache` never sees it —
+that route has no `location` of its own and the visitor following a reset link is anonymous — so
+`$mkt_credential_uri` in `conf.d/30-cache.conf` is the URL test beside it (E12-S26). It matches the same
+four prefixes the logging maps redact, deliberately duplicated because that map needs a named capture and
+this one needs a yes; the suite asserts both files still carry the list, since a fifth link added to one
+of them would be redacted in the log and stored on disk in full.
+
 ⚠️ **The `__CSP_NONCE__` contract spans two repos.** The SSR renderer writes that literal placeholder
 into its inline script tags and nginx substitutes the per-request `$csp_nonce` on the way out, so a
 cached page never carries one visitor's nonce. `location /` therefore forces `Accept-Encoding ""` —
@@ -78,6 +88,17 @@ address variable by the same 2026-08-10 decision that took the address out of th
 the three vhosts, because a block that declares none inherits the stock http-level one and that is
 `combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
 none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
+
+⚠️ **The same format names no `$request` and no `$http_referer` either, and both omissions are
+controls.** Four mailed links carry `:email/:hash` in the path — `/check/verify-email-user/`,
+`/check/verify-email/`, `/reset-password/` and `/x/reset/` — so the raw request line is an account
+address next to a live one-time hash (E12-S16). The request line is rebuilt from `$request_method`,
+`$request_uri` through a `map`, and `$server_protocol`; the referer goes through a second map, because
+`strict-origin-when-cross-origin` on the customer surface sends the full URL on same-origin requests
+and the reset page's own calls would carry the link. ⚠️ **Only two of the four have a `location` block
+of their own** — the other two are an SSR route and a SPA fallback — which is why the redaction is at
+http level on the logged value and must stay there. Restoring `$request` for readability puts every
+one of them back.
 
 ⚠️ **All four 443 blocks demand a client certificate, so the origin answers Cloudflare and nobody
 else.** `snippets/origin-pull.conf` (E12-S15) is included at server level four times, not three — the

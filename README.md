@@ -90,11 +90,11 @@ then a second lock on the same door, and the only one a config review can see.
 |File|Level|Role|
 |---|---|---|
 |`conf.d/00-hardening.conf`|http|`server_tokens off`, slow-request timeouts, header buffers|
-|`conf.d/05-logging.conf`|http|`log_format mkt_access` — the one access-log format, and it records no address|
+|`conf.d/05-logging.conf`|http|`log_format mkt_access` — the one access-log format: no address, and no mailed-link credential|
 |`conf.d/06-real-ip.conf`|http|Cloudflare's ranges + `CF-Connecting-IP` — the only place the platform learns a client address|
 |`conf.d/10-upstreams.conf`|http|every backend, one `upstream` each, with keepalive pools|
 |`conf.d/20-rate-limit.conf`|http|`limit_req_zone` / `limit_conn_zone` — per-surface, not shared|
-|`conf.d/30-cache.conf`|http|HTML cache zone and session-bypass map, customer surface only|
+|`conf.d/30-cache.conf`|http|HTML cache zone, session-bypass map and mailed-credential bypass map, customer surface only|
 |`conf.d/40-tls.conf`|http|protocols, ciphers, session cache, and the `444` default server|
 |`snippets/origin-pull.conf`|server|mutual TLS — the CA Cloudflare's client certificate is verified against, included by all four 443 blocks|
 |`snippets/proxy-backend.conf`|server|**the `Secure` rewrite**, keepalive, forwarded headers, timeouts|
@@ -395,7 +395,7 @@ hatch precisely because it is conspicuous.
 |proxy headers|`X-Forwarded-Proto: https` and the original `Host` survive the hop|
 |CSP nonce|the nonce in the delivered HTML equals the one in the header, on a cache MISS **and** a HIT|
 |security headers|every location that sets an `add_header` of its own still ships the full policy|
-|SSR cache|MISS → HIT → BYPASS with a session, and the session response is never stored|
+|SSR cache|MISS → HIT → BYPASS with a session, and the session response is never stored; a URL carrying a mailed `:email/:hash` credential is BYPASS on the first visit and on the second — never a HIT off its own key — while an ordinary page still goes MISS → HIT, which is what stops a too-greedy bypass regex from turning the cache off unnoticed|
 |server hardening|`Server:` carries no version on any host; the two token endpoints are **not** compressed while `/assets/` is, checked against a body large enough for the difference to mean something|
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
@@ -403,6 +403,7 @@ hatch precisely because it is conspicuous.
 |real client address|a `CF-Connecting-IP` from outside `set_real_ip_from` is ignored and the caller's `X-Forwarded-For` never reaches the upstream; from inside it, `$remote_addr` becomes the claimed address, a second address gets a budget of its own, and flooding a rotation zone leaves that address able to log in — and the reverse|
 |origin pulls|all four 443 blocks refuse a caller presenting no client certificate and serve one presenting a certificate from the trusted CA; a certificate from an unrelated CA is refused; `ssl_verify_client` is declared once, the default server has none, and `:80` still completes an ACME challenge with no certificate at all|
 |access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
+|mailed-link redaction|the format names no raw `$request`, `$request_uri` or `$http_referer`, and both redacting maps exist; all four `:email/:hash` links are then driven for real — encoded `%40` and decoded `@` — and each log line keeps the flow name, drops the address and the hash, and stays address-free; the last one carries the reset URL in `Referer` instead of in the path|
 
 The access-logging group runs after the rate-limit one and reloads nginx a second time, with
 `test/real-ip-overlay.conf` trusting the loopback. That overlay exists because the deployed
@@ -494,6 +495,10 @@ curl -sI https://marketplace-domain.com/shops | grep -i x-cache-status   # HIT
 curl -sI -H 'Cookie: refresh_token=whatever' https://marketplace-domain.com/shops \
 	| grep -i x-cache-status                                              # BYPASS
 
+# nor must a mailed link, whose URL *is* the credential — anonymous, so the cookie map sees nothing
+curl -sI 'https://marketplace-domain.com/reset-password/someone%40example.com/HASH' \
+	| grep -i x-cache-status                                              # BYPASS
+
 # the HTML must contain the metadata, not a JS bundle that will add it later
 curl -s https://marketplace-domain.com/shop/<slug> | grep -E '<title>|rel="canonical"|application/ld\+json'
 
@@ -538,6 +543,16 @@ silently stops matching and the pages break on HITs only.
 both.** The first skips the *lookup*; the second skips the *store*. With only the first, a logged-in
 customer's personalised HTML is fetched fresh and then saved for the next anonymous visitor.
 
+**Both of them read *two* variables, and the second one is not about the visitor.** `proxy_cache_key` is
+the full request URI, so a mailed `/reset-password/:email/:hash` link becomes a file under
+`/var/cache/nginx/marketplace-user/` whose header holds an account address next to a live one-time hash —
+kept up to `inactive=24h`, which is the lifetime, not the 60s of `proxy_cache_valid`, and in a directory
+nothing rotates and nothing shreds. ⚠️ **The cookie map cannot catch it**: that route has no `location`
+block of its own and whoever follows a reset link is anonymous by definition, so `$mkt_user_no_cache` is 0
+for exactly the request that must not be stored. `$mkt_credential_uri` (E12-S26) is the URL test beside
+it, matching the same four prefixes `conf.d/05-logging.conf` redacts — the log and the cache have to agree
+about which links carry a credential, and the suite fails if the two lists drift.
+
 **The private areas are client-rendered, so they never produce cacheable HTML in the first place.** The
 bypass map is the second line of defence, not the first. Do not weaken the app's rendering split on the
 grounds that nginx is handling it — and never turn SSR on for an `/account` route.
@@ -568,6 +583,18 @@ each carry the line rather than only the three vhosts. And an http-level `access
 fix that: `access_log` is additive at the same level, so the stock one would keep writing alongside it.
 Today the address in those lines would be a Cloudflare edge address; `conf.d/06-real-ip.conf` turns it
 into a visitor's, with nothing in that diff to say so.
+
+**`$request` and `$http_referer` are the mailed links in full, so the format names neither.** Four
+links put `:email/:hash` in the path — the two `/check/verify-email*` routes, the customer's
+`/reset-password/` and the shop owner's `/x/reset/` — and the hash is live while the line sits on
+disk. `conf.d/05-logging.conf` therefore builds the request line from `$request_method`, a
+`$request_uri` passed through a `map`, and `$server_protocol`, and passes the referer through a
+second map, because a raw variable cannot be rewritten. Three things follow that are easy to undo by
+accident. Redacting per `location` covers half the links and looks complete — only two of the four
+have a block of their own, and the map is at http level for that reason. Putting `$request` back for
+"better debugging" restores the credential on every one of them. And the referer is not decoration:
+`strict-origin-when-cross-origin` on the customer surface sends the full URL on same-origin requests,
+so the reset page's own asset and GraphQL calls carry the link into the next field along.
 
 **`snippets/origin-pull.conf` goes in four server blocks, and a vhost count says three.** The `www`
 redirect in `sites-available/marketplace-domain.com.conf` is a server block of its own; leaving it out

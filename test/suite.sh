@@ -404,6 +404,37 @@ assert_header x-cache-status 'BYPASS' 'request with a session   → BYPASS (skip
 probe GET marketplace-domain.com /cache-probe-b
 assert_header x-cache-status 'MISS' 'the session response was never stored (proxy_no_cache)'
 
+# The mailed-link credential. Defined once and used by two sections — the cache must never store
+# a URL carrying it (E12-S26, below) and the log must never record one (E12-S16, further down) —
+# so the two cannot drift onto different probe values and each pass against the other's.
+LINK_EMAIL='probe@example.invalid'
+LINK_EMAIL_ENC='probe%40example.invalid'
+LINK_HASH='MKTS16LIVEONETIMEHASH0000'
+
+echo
+echo '  --- and never a URL that carries a mailed one-time credential (E12-S26) ---'
+# ⚠️ The cookie map cannot reach this case. `/reset-password/:email/:hash` has no `location` block
+# — it is an SSR route served through `location /` — and whoever follows a reset link is anonymous
+# by definition, so `$mkt_user_no_cache` is 0 for exactly the request that must never be stored.
+# Without `$mkt_credential_uri` the address and the live hash become a cache key on disk, kept up
+# to `inactive=24h`, in a directory nothing rotates and nothing shreds.
+probe GET marketplace-domain.com "/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'anonymous reset link     → BYPASS (never becomes a cache key)'
+probe GET marketplace-domain.com "/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'and on the second visit  → BYPASS, not a HIT off the first'
+
+# The decoded form, and the shape koa-utils sends when nothing overrides its default `linkPath`.
+# Both reach `location /` on the apex the same way the SSR route does.
+probe GET marketplace-domain.com "/x/reset/$LINK_EMAIL/$LINK_HASH"
+assert_header x-cache-status 'BYPASS' 'apex /x/reset/ decoded @ → BYPASS'
+
+# The other direction. A bypass keyed on the URL is one bad regex away from bypassing everything,
+# which turns the cache off in production with every assertion above still green.
+probe GET marketplace-domain.com /cache-probe-c
+assert_header x-cache-status 'MISS' 'an ordinary page is still cacheable → MISS'
+probe GET marketplace-domain.com /cache-probe-c
+assert_header x-cache-status 'HIT'  'and still served from the cache     → HIT'
+
 echo
 echo '==================================================================='
 echo ' TLS termination and redirects'
@@ -600,12 +631,48 @@ done
 # The other direction, and it is not decoration: a format that logs nothing is trivially clean and
 # gets reverted the first time somebody has to debug from it, which loses the property above too.
 _missing=''
-for _v in '$time_iso8601' '$host' '$request' '$status' '$body_bytes_sent' '$http_referer' \
-	'$http_user_agent' '$request_time' '$upstream_response_time'; do
+for _v in '$time_iso8601' '$host' '$request_method' '$mkt_uri' '$server_protocol' '$status' \
+	'$body_bytes_sent' '$mkt_referer' '$http_user_agent' '$request_time' '$upstream_response_time'; do
 	case "$FMT" in *"$_v"*) ;; *) _missing="$_missing $_v" ;; esac
 done
 [ -z "$_missing" ] && pass 'log_format mkt_access keeps everything not derived from the network' ||
 	fail "log_format mkt_access dropped$_missing"
+
+# E12-S16 — the raw forms, and naming any one of them puts the account address and a live one-time
+# hash straight back in the file. ⚠️ Matched by regex rather than by `case`, because `$request` is a
+# prefix of `$request_method` and `$request_time`, which the format legitimately names: a substring
+# test here would fail every run.
+_raw=''
+_names_raw() {   # NAME REGEX — record NAME when the format matches REGEX
+	printf '%s\n' "$FMT" | grep -qE "$2" && _raw="$_raw $1"
+}
+_names_raw '$request'      '\$request([^_a-zA-Z0-9]|$)'
+_names_raw '$request_uri'  '\$request_uri'
+_names_raw '$http_referer' '\$http_referer'
+[ -z "$_raw" ] && pass 'log_format mkt_access names no un-redacted request line or referer' ||
+	fail "log_format mkt_access names$_raw — that is the mailed link in full"
+
+# And the maps those two redacted variables come from. A format naming `$mkt_uri` with no map to
+# define it does not fail `nginx -t` in any way a reader would connect to this: nginx refuses the
+# whole configuration with `unknown "mkt_uri" variable`, which reads like a typo rather than like a
+# deleted control.
+for _m in mkt_uri mkt_referer; do
+	grep -qE "^map[[:space:]]+\\\$[a-z_]+[[:space:]]+\\\$$_m[[:space:]]*\{" /src/conf.d/05-logging.conf &&
+		pass "\$$_m is defined by a map in 05-logging.conf" ||
+		fail "\$$_m has no map — the format names a variable nothing redacts"
+done
+
+# E12-S26 — a third map, in conf.d/30-cache.conf, matches the same four prefixes and stops the edge
+# STORING what these two stop it LOGGING. Two regexes over one list, because the redaction map needs
+# a named capture to rebuild the flow name and the cache map only needs a yes. Asserted as a literal
+# string on purpose: a fifth mailed link added to one file and not the other would otherwise be
+# redacted in the log while sitting in /var/cache/nginx/ in full, and nothing would say so.
+_alt='check/verify-email-user|check/verify-email|reset-password|x/reset'
+for _f in 05-logging.conf 30-cache.conf; do
+	grep -qF "$_alt" "/src/conf.d/$_f" &&
+		pass "conf.d/$_f matches all four mailed-link prefixes" ||
+		fail "conf.d/$_f no longer carries '$_alt' — the redaction and the cache bypass have drifted"
+done
 
 # An `access_log` with no format name means the built-in `combined`, and so does a server block
 # that declares none at all and inherits the stock http-level one. Both start with the address, so
@@ -654,6 +721,78 @@ for h in $HOSTS; do
 	assert_log_clean "$h.access.log" "$h — no address in the access log"
 done
 
+echo
+echo '  --- and no account address or one-time hash either (E12-S16) ---'
+
+# The four mailed links, driven as a mail client follows them. Two are the encoded form koa-utils
+# actually sends (`encodeURI` turns `@` into `%40`), two the decoded form, because a client that
+# normalises the URL must not walk out of the redaction. `LINK_EMAIL`, `LINK_EMAIL_ENC` and
+# `LINK_HASH` are defined once, up in the SSR cache section, which asserts the other half of the
+# same problem: the log must not record these values and the cache must not store them.
+
+# assert_log_redacted FILE EXPECTED LABEL — the newest line must exist, must carry EXPECTED, and
+# must hold neither half of the credential in either encoding. EXPECTED is not decoration: a format
+# that logged no URI at all would satisfy "the address does not appear" and lose every reason the
+# access log is kept. The address check rides along on the same line — one request, both properties.
+assert_log_redacted() {
+	_line=$(tail -1 "/var/log/nginx/$1")
+	if [ -z "$_line" ]; then
+		fail "$3 — nothing was logged at all, so the redaction assertion never ran"
+		return
+	fi
+	_hit=''
+	for _s in "$LINK_EMAIL" "$LINK_EMAIL_ENC" "$LINK_HASH" "$CLIENT_IP" "$HOP_IP" 127.0.0.1; do
+		case "$_line" in *"$_s"*) _hit="$_hit $_s" ;; esac
+	done
+	case "$_line" in *"$2"*) ;; *) _hit="$_hit (no '$2')" ;; esac
+	if [ -n "$_hit" ]; then
+		fail "$3 —$_hit in: $_line"
+	else
+		pass "$3"
+		echo "        $_line"
+	fi
+}
+
+link_probe() {   # HOST PATH [extra curl args…]
+	_lh=$1
+	_lp=$2
+	shift 2
+	: >"/var/log/nginx/$_lh.access.log"
+	probe GET "$_lh" "$_lp" -H "CF-Connecting-IP: $CLIENT_IP" \
+		-H "X-Forwarded-For: $CLIENT_IP, $HOP_IP" "$@"
+}
+
+link_probe marketplace-domain.com "/check/verify-email-user/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_status 200 'apex  /check/verify-email-user/ answered the logged request'
+assert_log_redacted marketplace-domain.com.access.log '/check/verify-email-user/[redacted]' \
+	'apex  /check/verify-email-user/:email/:hash — redacted'
+
+link_probe shopowner.marketplace-domain.com "/check/verify-email/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_status 200 'owner /check/verify-email/ answered the logged request'
+assert_log_redacted shopowner.marketplace-domain.com.access.log '/check/verify-email/[redacted]' \
+	'owner /check/verify-email/:email/:hash — redacted'
+
+# ⚠️ These two have no `location` block of their own — the customer reset link is an SSR route and
+# the shop-owner one is koa-utils' default `linkPath`, which nothing here mounts. They are the
+# reason the redaction is wired to the logged value at http level and not per location.
+link_probe marketplace-domain.com "/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_log_redacted marketplace-domain.com.access.log '/reset-password/[redacted]' \
+	'apex  /reset-password/:email/:hash — redacted, and it matches no location block'
+
+link_probe shopowner.marketplace-domain.com "/x/reset/$LINK_EMAIL/$LINK_HASH"
+assert_log_redacted shopowner.marketplace-domain.com.access.log '/x/reset/[redacted]' \
+	'owner /x/reset/:email/:hash — redacted, decoded @ and no location block'
+
+# The second route into the same field. `strict-origin-when-cross-origin` on the customer surface
+# sends the full URL on a same-origin request, so every asset and every GraphQL call the reset page
+# makes carries the credential in `Referer` — with the request line clean and the next field not.
+link_probe marketplace-domain.com / \
+	-H "Referer: https://marketplace-domain.com/reset-password/$LINK_EMAIL_ENC/$LINK_HASH"
+assert_log_redacted marketplace-domain.com.access.log \
+	'https://marketplace-domain.com/reset-password/[redacted]' \
+	'apex  Referer from the reset page — redacted'
+
+echo
 # E12-S07 changes what is written to disk and nothing else. The forwarded address is load-bearing:
 # it is what a service would have to read if it ever needed one, and this assertion is what stops
 # the story being read as a licence to strip the headers.
