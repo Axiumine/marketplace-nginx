@@ -103,10 +103,11 @@ then a second lock on the same door, and the only one a config review can see.
 |`sites-available/marketplace-domain.com.conf`|—|customer vhost: SSR, cache, static, 5 endpoints, geocoder|
 |`sites-available/shopowner.marketplace-domain.com.conf`|—|shop-owner vhost: SPA, 4 endpoints, `/check/verify-email/`|
 |`sites-available/admin.marketplace-domain.com.conf`|—|operator vhost: SPA, 4 endpoints|
+|`logrotate.d/nginx`|—|**retention** — 14 daily rotations with `shred` on removal, over all eight log destinations|
 |`.githooks/pre-commit`|—|the platform secret guard, and nothing after it — no code here to gate|
 |`.githooks/pre-push`|—|the quality gate — runs `test/run.sh`, blocks the push on any failure|
 |`test/run.sh`|—|entry point — runs the suite below in a throwaway container|
-|`test/suite.sh`|—|`nginx -t` plus 204 behavioural assertions; runs *inside* the container|
+|`test/suite.sh`|—|`nginx -t` plus 234 behavioural assertions; runs *inside* the container|
 |`test/fake-backends.conf`|—|stand-ins for the eleven upstreams, test-only, never installed|
 |`test/real-ip-overlay.conf`|http|test-only — trusts the loopback so the log assertions run against the post-`set_real_ip_from` shape|
 
@@ -173,6 +174,26 @@ sudo chown -R www-data:www-data /var/cache/nginx/marketplace-user
 
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+Retention is part of the install, not an afterthought — the error logs carry a client address in every
+line and their lifetime is the only control on it (E12-S19):
+
+```bash
+sudo cp logrotate.d/nginx /etc/logrotate.d/nginx      # over the packaged one, deliberately
+sudo logrotate -d /etc/logrotate.d/nginx              # parses, and lists what it will rotate
+```
+
+⚠️ **Over the packaged file, under the same name.** Two files in `/etc/logrotate.d` globbing
+`/var/log/nginx/*.log` are a duplicate entry: logrotate prints
+`error: <file>:1 duplicate log entry for …`, skips the **whole** later-named file and exits 1. Installed
+as `marketplace-nginx` it would be the distribution's weekly `rotate 4` that wins on name order and this
+policy that is silently dropped, with the only trace in cron mail. It is a dpkg conffile, so `apt` will
+ask on the next nginx upgrade — keep the local version.
+
+⚠️ **`shred` needs GNU coreutils and fails open without it.** logrotate shreds by handing the open
+descriptor to `shred … -`, which busybox's applet cannot do; on such a host every removal prints
+`Failed to shred …, trying unlink`, unlinks anyway and still exits 0. Debian 13 ships GNU coreutils, so
+the target is fine — an Alpine-based image is not.
 
 Certificates, one per host (the apex's covers `www` too):
 
@@ -404,6 +425,7 @@ hatch precisely because it is conspicuous.
 |origin pulls|all four 443 blocks refuse a caller presenting no client certificate and serve one presenting a certificate from the trusted CA; a certificate from an unrelated CA is refused; `ssl_verify_client` is declared once, the default server has none, and `:80` still completes an ACME challenge with no certificate at all|
 |access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
 |mailed-link redaction|the format names no raw `$request`, `$request_uri` or `$http_referer`, and both redacting maps exist; all four `:email/:hash` links are then driven for real — encoded `%40` and decoded `@` — and each log line keeps the flow name, drops the address and the hash, and stays address-free; the last one carries the reset URL in `Referer` instead of in the path|
+|log retention|`logrotate.d/nginx` parses, reads back as 14 daily rotations, and covers every destination the repo names plus nginx's own `error.log`; the shape is asserted directive by directive; then sixteen forced rotations run for real and both removals — the plaintext copy at compression time and the generation that falls off `rotate 14` — go through `shred` with no error|
 
 The access-logging group runs after the rate-limit one and reloads nginx a second time, with
 `test/real-ip-overlay.conf` trusting the loopback. That overlay exists because the deployed
@@ -412,6 +434,12 @@ connects from its own loopback, and the real file would therefore leave `$remote
 the second half of the assertions would pass without ever having been exercised. The upstream echoes
 `X-Real-IP` back, and the suite asserts it has become the client address before believing anything the
 log assertions say.
+
+The retention group runs **last of all, and nothing may be added after it**: it rotates
+`/var/log/nginx/*.log` for real, sixteen times, so every file the groups above assert on has been
+renamed and gzipped by the time it finishes. It creates a `www-data` user the image does not have,
+because `create 0640 www-data adm` is resolved when the config is read and the point of the group is
+that the bytes the repo installs are the bytes that work.
 
 The rate-limit group runs **after everything except that, and after a full nginx restart**, and every other endpoint is probed
 exactly once. `limit_req` counters live in shared memory: they survive a reload, and a suite that spent
@@ -611,7 +639,13 @@ goes for anyone debugging with `curl --resolve` — the `400 Bad Request` is the
 
 **The `error_log` is a separate file that none of this reaches.** nginx hard-codes a `client: <address>`
 prefix into every error entry and exposes no format for it — only the destination and the level. The
-access-log format is not a property of the edge as a whole.
+access-log format is not a property of the edge as a whole. Measured, at the `warn` all three vhosts
+ship, five of five request-scoped entries carry that prefix and the 162 process-lifecycle entries carry
+none — so every line in a per-host error log is a line with an address in it. That is decided rather
+than pending: the address stays, and `logrotate.d/nginx` makes the file's lifetime the control instead
+(E12-S19). Changing the level breaks the decision in both directions — `info` adds two more
+address-bearing classes, and anything stricter than `warn` drops the failures the file exists for — so
+the suite asserts all three are still `warn`.
 
 ## Known gaps, stated so they are not read as oversights
 

@@ -1,0 +1,100 @@
+# Install to /etc/logrotate.d/nginx — REPLACING the file the distribution's nginx package ships
+# under that exact name. `README.md` §Install has the command; the duplicate-entry block below has
+# the reason it is a replacement rather than an addition.
+#
+# ---------------------------------------------------------------------------------------
+# ⚠️ THE LIFETIME OF THESE FILES IS THE ONLY CONTROL ON WHAT IS IN THEM (E12-S19).
+#
+# The access logs carry no client address — `conf.d/05-logging.conf` sees to that, and the mailed
+# `:email/:hash` links are redacted there too. The **error** logs are a different matter and cannot
+# be given the same treatment: nginx builds every entry with a hard-coded `client: <address>`
+# prefix, and only the destination and the level are configurable, so no `log_format` reaches them.
+# Measured — `docs/report/log-sink-inventory.md` §6.1 in the parent workspace — at the `warn` all
+# three vhosts ship, **five of five** request-scoped entries carry that prefix, and the 162
+# process-lifecycle entries that do not go to a different file. Every line in a per-host error log
+# is a line with an address in it.
+#
+# The platform owner's decision of 2026-08-11 is that this stays: *"keep raw IPs in error_log,
+# logrotate at 14–30 days with shred, anonymize access_log, write two lines in your privacy
+# policy."* So the level stays `warn`, the content is not filtered, and **how long the file lives is
+# where the control moved to**. That makes this file part of the platform's data handling and not a
+# housekeeping detail — deleting it does not free disk, it removes a control.
+#
+# ⚠️ **14 days, and the owner gave 14–30.** The floor is taken because the only consumer of an nginx
+# error log here is a developer reading back a recent failure, and nothing on this platform reads
+# one older than a day. Raising it to 30 is `rotate 30` on one line below, with that reason already
+# in front of whoever changes it — and it is the retention two lines of the privacy notice state
+# (E12-S25), so the page changes in the same commit or it becomes a false statement.
+# ---------------------------------------------------------------------------------------
+
+# ⚠️ A glob and not a list of the eight destinations. Seven are declared in this repo — three
+# `*.access.log`, three `*.error.log` and `default.access.log` from `conf.d/40-tls.conf` — and the
+# eighth is nginx's own http-level `/var/log/nginx/error.log`, which holds the start/stop lines. A
+# list would cover exactly the vhosts that existed the day it was written; the ninth destination
+# added by the next vhost would inherit the host default instead, which is the state this story
+# exists to end. The container suite asserts every path the repo names is one this pattern picks up.
+/var/log/nginx/*.log {
+	# ⚠️ `rotate 14` with `daily` IS the retention. Any other period here — `weekly`, or a
+	# `rotate` that does not match it — silently changes how long an address is kept.
+	daily
+	rotate 14
+
+	missingok     # a vhost that has taken no traffic yet has no file, and that is not an error
+	notifempty
+	compress
+	# ⚠️ The reopen below is asynchronous: a worker can still hold the old descriptor for a moment
+	# after the signal, so compressing in the same run truncates the tail of the file. The cost is
+	# that one rotation's plaintext lives a day longer uncompressed — and its removal after the
+	# delayed compression is shredded as well, which was measured rather than assumed.
+	delaycompress
+
+	# ⚠️ **Removal is `shred`, not `unlink`.** A rotated-out file that is only unlinked is still on
+	# the device, which would make the 14 days a statement about the directory listing rather than
+	# about the data. No `shredcycles`: the default is GNU shred's own 3 passes, which is what the
+	# decision asked for.
+	#
+	# ⚠️ **It needs GNU coreutils' `shred` on PATH and degrades silently without it.** logrotate
+	# shreds by handing the open descriptor to `shred … -`, and busybox's applet cannot open `-`:
+	# measured in `nginx:stable-alpine`, every removal printed
+	# `error: Failed to shred <file>, trying unlink` and the file was unlinked anyway. The rotation
+	# still happens, the exit status is still 0, and the only trace is on logrotate's stderr — cron
+	# mail. Debian 13 ships GNU coreutils, so the deployment target is fine; a busybox-based image
+	# is not, and would need `coreutils` installed before this line means anything.
+	#
+	# ⚠️ **`shred` overwrites the blocks the file occupies now.** On a copy-on-write filesystem
+	# (btrfs, ZFS), on ext4 with `data=journal`, or on any SSD doing wear levelling, an earlier copy
+	# of those blocks can survive somewhere the overwrite never reaches. It raises the cost of
+	# recovery; it is not a guarantee, and it is not what makes the 14 days defensible — the 14 days
+	# are.
+	shred
+
+	create 0640 www-data adm
+	# ⚠️ Required, not decoration: `/var/log/nginx` on Debian belongs to `www-data`, and logrotate
+	# refuses a directory owned by a non-root user unless a `su` line tells it whom to act as.
+	# Without this the whole stanza is skipped with a warning nobody reads.
+	su root adm
+
+	# ⚠️ Without the signal nginx goes on writing to the renamed inode: the new file stays empty,
+	# the real log is invisible to `ls` but still growing, and rotation 15 deletes the lot. Under
+	# `sharedscripts` the signal is sent once, after all eight files have been renamed, rather than
+	# once per file mid-rotation.
+	sharedscripts
+	postrotate
+		[ -f /run/nginx.pid ] && kill -USR1 "$(cat /run/nginx.pid)" || true
+	endscript
+}
+
+# ---------------------------------------------------------------------------------------
+# ⚠️ TWO STANZAS MATCHING THE SAME FILE MAKE LOGROTATE DROP ONE OF THEM WHOLE.
+#
+# Measured: with a second file in `/etc/logrotate.d` globbing `/var/log/nginx/*.log`, logrotate
+# prints `error: <file>:1 duplicate log entry for /var/log/nginx/default.access.log`, then
+# `error: found error in file <file>, skipping`, and exits 1 — the *whole* file is dropped, not just
+# the clashing stanza, and the alphabetically later one loses. That is why this installs over
+# `/etc/logrotate.d/nginx` instead of alongside it as `marketplace-nginx`: with both present the
+# distribution's weekly/`rotate 4` would win on name order and this file would be the one skipped,
+# with the only symptom in cron mail.
+#
+# ⚠️ It is a dpkg conffile. `apt upgrade` of the nginx package will ask whether to keep the local
+# version — keep it, and re-read this file if the packaged one has changed.
+# ---------------------------------------------------------------------------------------

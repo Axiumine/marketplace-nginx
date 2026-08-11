@@ -16,7 +16,11 @@ set -eu
 # --------------------------------------------------------------------------------------
 # Setup
 # --------------------------------------------------------------------------------------
-apk add --no-cache openssl curl >/dev/null 2>&1
+# ⚠️ `coreutils` is not decoration next to `logrotate`. logrotate shreds a rotated file by handing
+# its open descriptor to `shred … -`, and busybox's applet cannot open `-`: without GNU shred every
+# removal falls back to `unlink` after printing an error, which is precisely the silent degradation
+# the retention section at the end of this file exists to catch. Debian 13 ships GNU coreutils.
+apk add --no-cache openssl curl logrotate coreutils >/dev/null 2>&1
 
 HOSTS='marketplace-domain.com shopowner.marketplace-domain.com admin.marketplace-domain.com'
 
@@ -892,8 +896,125 @@ else
 fi
 
 # ⚠️ Nothing above touches the error log, and nothing can: nginx builds each entry with a
-# hard-coded `client: <address>` prefix and no `log_format` reaches it. See conf.d/05-logging.conf
-# and E12-S12, which owns the residue.
+# hard-coded `client: <address>` prefix and no `log_format` reaches it. Measured — the parent
+# workspace's `docs/report/log-sink-inventory.md` §6.1 — five of five request-scoped entries at the
+# shipped `warn` carry that prefix. The decision is that they keep it and that the lifetime of the
+# file is the control instead, which is what the section below tests.
+
+# --------------------------------------------------------------------------------------
+# Log retention — E12-S19. Last, and after the rotation it performs nothing may read a log
+# file again: the forced runs below rename and compress the very files the section above
+# asserts on.
+# --------------------------------------------------------------------------------------
+echo
+echo '==================================================================='
+echo ' Log retention — logrotate.d/nginx'
+echo '==================================================================='
+
+# The deployment target is Debian, where nginx runs as `www-data`. This image has no such user, and
+# `create 0640 www-data adm` is resolved when the config is read — so logrotate would refuse the
+# shipped file for a reason that has nothing to do with the file. Create the user rather than test a
+# modified copy: the point of this section is that the bytes the repo installs are the bytes that
+# work.
+adduser -S -D -H www-data 2>/dev/null
+
+# Over the top of the one the `logrotate` package ships under that name, which is the install step
+# `README.md` describes and the reason this repo's file is called `nginx` too: two files globbing
+# `/var/log/nginx/*.log` make logrotate drop one of them whole.
+LR=/etc/logrotate.d/nginx
+cp /src/logrotate.d/nginx "$LR"
+
+_lr_ship=$(ls /src/logrotate.d | tr '\n' ' ')
+[ "$_lr_ship" = 'nginx ' ] &&
+	pass 'logrotate.d ships exactly one file, named nginx — one stanza per log file' ||
+	fail "logrotate.d holds '$_lr_ship' — a second file globbing the same logs is a duplicate entry, and logrotate skips the whole later file"
+
+# Every destination the repo names, plus nginx's own http-level error.log, which is not in any file
+# here and is where the 162 start/stop entries land. `logrotate -d` then reports which of them the
+# pattern picks up, so this is logrotate's reading of the glob and not a second grep of it.
+_dests=$(grep -rhoE '(access_log|error_log)[[:space:]]+/var/log/[^[:space:];]+' \
+	/src/conf.d /src/sites-available /src/snippets | awk '{print $2}' | sort -u)
+_dests="$_dests
+/var/log/nginx/error.log"
+for _d in $_dests; do
+	mkdir -p "$(dirname "$_d")"
+	printf 'retention probe\n' >>"$_d"
+done
+
+if logrotate -d -s /tmp/logrotate.state "$LR" >/tmp/lr-debug.out 2>&1; then
+	pass 'logrotate -d accepts logrotate.d/nginx — the shipped file parses'
+else
+	fail 'logrotate.d/nginx does not parse'
+	sed 's/^/        /' /tmp/lr-debug.out
+fi
+
+_uncovered=''
+for _d in $_dests; do
+	grep -qF "considering log $_d" /tmp/lr-debug.out || _uncovered="$_uncovered $_d"
+done
+[ -z "$_uncovered" ] &&
+	pass 'every log destination in the repo is covered by the rotation pattern' ||
+	fail "not rotated:$_uncovered — those files live as long as the host lets them"
+
+# The period and the count, read back out of logrotate rather than out of the file. `daily` +
+# `rotate 14` IS the 14 days; a `weekly` that kept the same count would be 98.
+_pattern=$(grep -m1 '^rotating pattern:' /tmp/lr-debug.out)
+case "$_pattern" in
+	*'after 1 days'*'(14 rotations)'*)
+		pass 'retention is 14 daily rotations — the owner decision of 2026-08-11, at its floor' ;;
+	*)  fail "retention is not 14 daily rotations — logrotate read: $_pattern" ;;
+esac
+
+# The rest of the shape. Compression, mode and owner are the story's own criteria; `su` and
+# `sharedscripts` are the two lines whose absence breaks rotation on the deployment target while
+# leaving this file looking correct.
+for _need in 'compress' 'shred' 'create 0640 www-data adm' 'su root adm' 'sharedscripts'; do
+	grep -qE "^[[:space:]]*$_need[[:space:]]*(#.*)?$" "$LR" &&
+		pass "logrotate.d/nginx declares '$_need'" ||
+		fail "logrotate.d/nginx no longer declares '$_need'"
+done
+grep -qF 'kill -USR1' "$LR" &&
+	pass 'logrotate.d/nginx signals nginx to reopen after the rename' ||
+	fail 'no USR1 in postrotate — nginx would keep writing to the renamed inode and the new file would stay empty'
+
+# ⚠️ The error log keeps its level and its content on purpose (E12-S19): the address stays and the
+# lifetime is the control. Both directions are a regression — `info` adds two more address-bearing
+# classes (finding §6.3), and anything above `warn` drops the failures these files exist for.
+_levels=$(grep -rhoE 'error_log[[:space:]]+/var/log/nginx/[^[:space:]]+[[:space:]]+[a-z]+;' \
+	/src/sites-available | awk '{print $3}' | sort -u | tr '\n' ' ')
+[ "$_levels" = 'warn; ' ] &&
+	pass 'every vhost error_log is still at warn' ||
+	fail "vhost error_log levels are '$_levels' — expected warn on all three"
+
+# The behavioural half: rotate for real until the retention boundary is crossed, and read back how
+# logrotate removed what fell off it. Sixteen forced runs, because `rotate 14` first has to build up
+# fourteen generations before the fifteenth can be dropped. A line is written before each run —
+# `notifempty` skips an empty file, so without it nothing rotates twice.
+_probe=/var/log/nginx/marketplace-domain.com.error.log
+_i=0
+while [ "$_i" -lt 16 ]; do
+	printf 'retention probe %s\n' "$_i" >>"$_probe"
+	logrotate -v -f -s /tmp/logrotate.run.state "$LR" >>/tmp/lr-run.out 2>&1
+	_i=$((_i + 1))
+done
+
+grep -qF "Using shred to remove the file $_probe.1" /tmp/lr-run.out &&
+	pass 'the plaintext copy is shredded when it is compressed, not unlinked' ||
+	fail 'the uncompressed rotation was removed without shred — the addresses in it are still on the device'
+
+grep -qF "Using shred to remove the file $_probe.15.gz" /tmp/lr-run.out &&
+	pass 'the generation that falls off rotate 14 is shredded, not unlinked' ||
+	fail 'nothing fell off the retention boundary through shred — rotate 14 is not removing anything, or it is unlinking it'
+
+# ⚠️ And that it *worked*, which is a different assertion: logrotate reports the shred it attempted
+# whether or not the binary could do it. On busybox the same run prints `Failed to shred …, trying
+# unlink`, rotates anyway and exits 0.
+if grep -qE '^error:' /tmp/lr-run.out; then
+	fail 'logrotate reported an error during the forced rotations:'
+	grep -E '^error:' /tmp/lr-run.out | sort -u | head -3 | sed 's/^/        /'
+else
+	pass 'sixteen forced rotations, no error — GNU shred is present and did the removals'
+fi
 
 echo
 echo '==================================================================='

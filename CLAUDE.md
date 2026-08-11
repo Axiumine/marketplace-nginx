@@ -110,12 +110,20 @@ container generates a throwaway one of its own. The Cloudflare side is **not yet
 staged `optional` → `on` rollout in `README.md` §Authenticated Origin Pulls is the only safe way to put
 this on a host — reloading straight to `on` first is an outage on all three hostnames.
 
-⚠️ **The error log is a different file and this does not cover it.** nginx builds each error entry
-with a hard-coded `client: <address>` prefix; only the destination and the level are configurable, so
-no `log_format` reaches it and the three vhosts running it at `warn` still write addresses there.
-Which levels emit that prefix in this configuration, and what the retention on those files is, is open
-work — E12-S12 in the parent workspace's `docs/devprotocol/phase5/epics/E12.md` owns it. Do not read
-the access-log format as having closed the question for the whole edge.
+⚠️ **The error log is a different file, and its control is `logrotate.d/nginx` rather than a format.**
+nginx builds each error entry with a hard-coded `client: <address>` prefix; only the destination and the
+level are configurable, so no `log_format` reaches it and the three vhosts running it at `warn` do write
+addresses there. Measured (`docs/report/log-sink-inventory.md` §6.1): severity is not the discriminator
+— five of five request-scoped entries at `warn` carry the prefix, none of the 162 process-lifecycle ones
+do — so **every line in a per-host error log is a line with an address in it**. The decision of
+2026-08-11 is that they stay and that lifetime is the control: 14 daily rotations, `shred` on removal,
+shipped by this repo (E12-S19) and installed **over** `/etc/logrotate.d/nginx`, because two files
+globbing `/var/log/nginx/*.log` make logrotate skip one of them whole. Three things to hold on to
+before editing that file: `rotate 14` with `daily` *is* the retention and the privacy notice states it
+(E12-S25), so the two change together; `shred` needs GNU coreutils and fails open to `unlink` on a
+busybox host, printing to cron mail and exiting 0; and the level stays `warn` in both directions, since
+`info` adds two more address-bearing classes (§6.3) and anything stricter drops the failures the file
+exists for.
 
 - **Ports live in the service `env` templates, not here.** `conf.d/10-upstreams.conf` mirrors
   `grep -m1 '^PORT=' <repo>/env`. Move a port in the template first and here second.
