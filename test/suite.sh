@@ -176,6 +176,9 @@ header()   { grep -i "^$1:" "$HDR" | sed "s/^[^:]*: *//"; }
 assert_status() { [ "$(status)" = "$1" ] && pass "$2 → $1" || fail "$2 → expected $1, got $(status)"; }
 assert_body()   { grep -qF "$1" "$BODY" && pass "$2" || fail "$2 — body was: $(head -c 120 "$BODY")"; }
 assert_no_body(){ grep -qF "$1" "$BODY" && fail "$2 — reached $1" || pass "$2"; }
+# Substring is the wrong test for a byte range: the requested slice is a substring of the whole
+# archive too, so assert_body would pass against exactly the response a range test must catch.
+assert_body_exact() { [ "$(cat "$BODY")" = "$1" ] && pass "$2" || fail "$2 — body was '$(head -c 120 "$BODY")', expected '$1'"; }
 assert_header() { header "$1" | grep -qiF "$2" && pass "$3" || fail "$3 — $1: $(header "$1" | head -1)"; }
 assert_no_header() { [ -z "$(header "$1")" ] && pass "$2" || fail "$2 — $1 was present"; }
 
@@ -438,6 +441,32 @@ probe GET marketplace-domain.com /cache-probe-c
 assert_header x-cache-status 'MISS' 'an ordinary page is still cacheable → MISS'
 probe GET marketplace-domain.com /cache-probe-c
 assert_header x-cache-status 'HIT'  'and still served from the cache     → HIT'
+
+echo
+echo '==================================================================='
+echo ' Map tiles — one PMTiles archive answered as byte ranges (NFR-PF09)'
+echo '==================================================================='
+# The claim under test is "served as HTTP range requests against one static archive, never proxied
+# through a live tile-serving process". A `proxy_pass` put in this location later would still
+# answer 200 with the whole body and the map would still draw — the client would just refetch the
+# entire archive for every tile, and nothing in a browser says so. The status code is the only
+# place that difference surfaces.
+probe GET marketplace-domain.com /tiles/x.pmtiles
+assert_status 200                                    'apex  /tiles/ — whole archive'
+assert_header accept-ranges 'bytes'                  'apex  /tiles/ — Accept-Ranges advertised'
+assert_header cache-control 'public, max-age=604800' 'apex  /tiles/ — one-week lifetime (refresh job is monthly)'
+
+# The fixture is `pmtiles\n`, 8 bytes. Asking for the middle is what proves nginx honours the
+# offset: a 206 whose body is still the whole file would pass a status-only assertion.
+probe GET marketplace-domain.com /tiles/x.pmtiles -H 'Range: bytes=4-6'
+assert_status 206                         'apex  /tiles/ — Range: bytes=4-6 answers Partial Content'
+assert_header content-range 'bytes 4-6/8' 'apex  /tiles/ — Content-Range names the slice and the total'
+assert_body_exact 'les'                   'apex  /tiles/ — body is the 3 bytes asked for, not the archive'
+
+# A reader that has the archive header will ask past the end of a stale copy. 416 is what tells it
+# to re-read; a 200 with the whole body is the failure this pins down.
+probe GET marketplace-domain.com /tiles/x.pmtiles -H 'Range: bytes=99-200'
+assert_status 416 'apex  /tiles/ — unsatisfiable range is refused, not answered whole'
 
 echo
 echo '==================================================================='
