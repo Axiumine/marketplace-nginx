@@ -32,14 +32,14 @@ nginx binary in `PATH`. These files describe the production edge. Nothing here h
 |---|---|---|---|---|
 | `marketplace-domain.com` | public site + customer account area | `marketplace-user` | `/srv/marketplace-user/dist/client` + SSR on 3045 | anonymous + `User` |
 | `shopowner.marketplace-domain.com` | shop-owner panel | `marketplace-shopowner` | `/srv/marketplace-shopowner/dist` | `ShopOwner` |
-| `admin.marketplace-domain.com` | operator panel | `marketplace-admin` | `/srv/marketplace-admin/dist` | `Admin` |
+| `admin.marketplace-domain.com` | admin panel | `marketplace-admin` | `/srv/marketplace-admin/dist` | `Admin` |
 
 `www.marketplace-domain.com` 308s to the apex over TLS. Any other name reaching this instance is refused
 at the handshake by the default server in `conf.d/40-tls.conf`.
 
 Three hosts, not one, and the split is load-bearing in four places:
 
-1. **The session cookie has no `Domain` attribute**, so it is host-only. An operator's session is not
+1. **The session cookie has no `Domain` attribute**, so it is host-only. An admin's session is not
    sent to the shop-owner host and cannot be read there. One host for all three tiers would put every
    tier's cookie in one jar.
 2. **`APP_DOMAIN` vs `APP_DOMAIN_USER`.** `marketplace-dev-public-resource` builds the shop owner's
@@ -47,7 +47,7 @@ Three hosts, not one, and the split is load-bearing in four places:
    `/check/verify-email-user/` are two routes against two collections; neither can tell from an
    `(email, hash)` pair which one minted it, so they are separated by host as well as by path.
 3. **Rate limiting.** All three logins hit the same process on 4028. The edge is the only layer that
-   still knows which hostname was asked for, so it is the only place a stuffing run against operator
+   still knows which hostname was asked for, so it is the only place a stuffing run against admin
    accounts can be stopped from spending the customers' allowance.
 4. **Header policy.** The customer surface needs a CSP loose enough for MapLibre and a nonce for its
    server-rendered inline script; the panels need neither and get a strictly tighter one. Both
@@ -102,7 +102,7 @@ then a second lock on the same door, and the only one a config review can see.
 |`snippets/security-headers-private.conf`|server/location|panel CSP + headers — strictly tighter, no nonce, no MapLibre, Turnstile allowed|
 |`sites-available/marketplace-domain.com.conf`|—|customer vhost: SSR, cache, static, 5 endpoints, geocoder|
 |`sites-available/shopowner.marketplace-domain.com.conf`|—|shop-owner vhost: SPA, 4 endpoints, `/check/verify-email/`|
-|`sites-available/admin.marketplace-domain.com.conf`|—|operator vhost: SPA, 4 endpoints|
+|`sites-available/admin.marketplace-domain.com.conf`|—|admin vhost: SPA, 4 endpoints|
 |`logrotate.d/nginx`|—|**retention** — 14 daily rotations with `shred` on removal, over all eight log destinations|
 |`.githooks/pre-commit`|—|the platform secret guard, and nothing after it — no code here to gate|
 |`.githooks/pre-push`|—|the quality gate — runs `test/run.sh`, blocks the push on any failure|
@@ -155,7 +155,7 @@ wrong service, which is a confusing way to find out.
 |`VITE_GRAPHQL_ENDPOINT_*`|both panels|**unset** — the same-origin defaults in `src/env.ts` are the correct production values|
 |`PUBLIC_RESOURCE_URL`|`marketplace-user` SSR|loopback `http://127.0.0.1:4027`, deliberately not through nginx|
 
-`APP_DOMAIN` pointing at the operator host instead of the shop-owner one sends every shop owner's
+`APP_DOMAIN` pointing at the admin host instead of the shop-owner one sends every shop owner's
 registration link to a panel that will never authenticate them.
 
 ## Install
@@ -319,7 +319,7 @@ ssl_verify_client      on;
 ```
 
 It is included at **server level in all four 443 blocks** — the `www` redirect and the apex in
-`sites-available/marketplace-domain.com.conf`, plus the shop-owner and operator vhosts. The `www` block
+`sites-available/marketplace-domain.com.conf`, plus the shop-owner and admin vhosts. The `www` block
 is a redirect and easy to skip; skipping it leaves one name that still answers an unauthenticated
 caller, which is exactly the property being removed. `grep -c 'include snippets/origin-pull.conf'` over
 `sites-available/` must read 4, and the suite asserts that count as well as the behaviour.
@@ -420,7 +420,7 @@ hatch precisely because it is conspicuous.
 |server hardening|`Server:` carries no version on any host; the two token endpoints are **not** compressed while `/assets/` is, checked against a body large enough for the difference to mean something|
 |TLS + redirects|308 on all four names, `www` → apex over TLS, ACME reachable on `:80`, unknown `Host` refused|
 |panel hardening|source maps 403, `robots.txt` disallow, SPA fallback intact, dotfiles denied|
-|rate limits|all three login zones — customer, shop owner, operator — let the burst through and then return 429, each out of its own budget|
+|rate limits|all three login zones — customer, shop owner, admin — let the burst through and then return 429, each out of its own budget|
 |real client address|a `CF-Connecting-IP` from outside `set_real_ip_from` is ignored and the caller's `X-Forwarded-For` never reaches the upstream; from inside it, `$remote_addr` becomes the claimed address, a second address gets a budget of its own, and flooding a rotation zone leaves that address able to log in — and the reverse|
 |origin pulls|all four 443 blocks refuse a caller presenting no client certificate and serve one presenting a certificate from the trusted CA; a certificate from an unrelated CA is refused; `ssl_verify_client` is declared once, the default server has none, and `:80` still completes an ACME challenge with no certificate at all|
 |access logging|the format names no address variable and still names everything that is not one; no `access_log` in the repo is left without it; and a real request carrying `CF-Connecting-IP` and an `X-Forwarded-For` produces a log line holding neither — asserted twice, the second time with `set_real_ip_from` in effect so `$remote_addr` is the client|
