@@ -158,7 +158,7 @@ pass() { echo "PASS  $1"; }
 fail() { echo "FAIL  $1"; FAILED=$((FAILED + 1)); }
 
 # probe METHOD HOST PATH [extra curl args…] — one request, many assertions read the result.
-# Keeping it to one request per endpoint matters: the operator login sits behind a 10r/m zone
+# Keeping it to one request per endpoint matters: the admin login sits behind a 10r/m zone
 # and a second courtesy request would spend the burst the rate-limit test needs.
 probe() {
 	_m=$1
@@ -590,7 +590,7 @@ done
 
 # --------------------------------------------------------------------------------------
 # Rate limiting. Restart first: limit_req counters live in shared memory that survives a
-# reload, and the assertions above have already spent part of the operator login's budget.
+# reload, and the assertions above have already spent part of the admin login's budget.
 # --------------------------------------------------------------------------------------
 echo
 echo '==================================================================='
@@ -620,7 +620,7 @@ burst_probe() {   # HOST PATH COUNT LABEL
 	esac
 }
 
-burst_probe admin.marketplace-domain.com     /public-authorization 24 'operator login  (mkt_admin_auth 1r/m b20)'
+burst_probe admin.marketplace-domain.com     /public-authorization 24 'admin login  (mkt_admin_auth 1r/m b20)'
 burst_probe shopowner.marketplace-domain.com /public-authorization 24 'shop-owner login (mkt_owner_auth 1r/m b20)'
 # The customer surface's own login zone. The two probes above are on the panel hostnames and spend
 # `mkt_owner_auth` / `mkt_admin_auth`; `mkt_auth` is a third, separate budget reached only through
