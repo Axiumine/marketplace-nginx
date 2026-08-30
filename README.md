@@ -81,8 +81,8 @@ it, not which networks may observe it. That was the 🔴 Critical of the token-h
 that report once this directory closed it — **as long as nginx is actually in front.** Nothing else on the platform sets the
 flag, nothing fails without it, and no test in any of the sixteen repos covers it.
 
-`secure: true` in koa-utils remains the real fix (it is the seventeenth repo, outside this workspace, and
-not bridged by `deploy-local.sh` the way `marketplace-common` is). When it lands, this line stays: it is
+`secure: true` in koa-utils remains the real fix (it is the seventeenth repo, outside this workspace, so
+none of the release discipline `marketplace-common` is held to is observable from it). When it lands, this line stays: it is
 then a second lock on the same door, and the only one a config review can see.
 
 ## Files
