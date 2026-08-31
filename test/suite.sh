@@ -416,7 +416,7 @@ assert_header x-cache-status 'MISS' 'the session response was never stored (prox
 # so the two cannot drift onto different probe values and each pass against the other's.
 LINK_EMAIL='probe@example.invalid'
 LINK_EMAIL_ENC='probe%40example.invalid'
-LINK_HASH='MKTS16LIVEONETIMEHASH0000'
+LINK_HASH='LIVEONETIMEHASHPROBE0000'
 
 echo
 echo '  --- and never a URL that carries a mailed one-time credential ---'
