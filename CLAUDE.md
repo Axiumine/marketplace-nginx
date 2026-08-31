@@ -54,7 +54,7 @@ shared process is being asked to run, so the per-vhost hostname is the only plac
 told apart. Renaming a zone onto an existing name merges two budgets with no error anywhere.
 
 ⚠️ **Rotation and login never share a zone, on any vhost.** `mkt_refresh`, `mkt_owner_refresh` and
-`mkt_admin_refresh` (10r/m, burst 20) exist because they used to (E12-S09), and putting them back
+`mkt_admin_refresh` (10r/m, burst 20) exist because they used to, and putting them back
 together breaks two things at once: a token flood spends the login burst and holds the whole address to
 1r/m, and rotation is timer-driven, so an office of fifty sessions rotating twice an hour is ~1.7/min
 sustained and trips a login-sized ceiling with no attacker present. The suite asserts the separation
@@ -70,7 +70,7 @@ in koa-utils would serve one logged-in customer's HTML to everybody.
 file whose header holds the account address beside a live one-time hash, kept for `inactive=24h` rather
 than the 60s of `proxy_cache_valid`, in a directory nothing rotates. `$mkt_user_no_cache` never sees it —
 that route has no `location` of its own and the visitor following a reset link is anonymous — so
-`$mkt_credential_uri` in `conf.d/30-cache.conf` is the URL test beside it (E12-S26). It matches the same
+`$mkt_credential_uri` in `conf.d/30-cache.conf` is the URL test beside it. It matches the same
 four prefixes the logging maps redact, deliberately duplicated because that map needs a named capture and
 this one needs a yes; the suite asserts both files still carry the list, since a fifth link added to one
 of them would be redacted in the log and stored on disk in full.
@@ -83,8 +83,8 @@ hydrates, with nothing in the console.
 
 ⚠️ **The access logs carry no client address, and one new `access_log` line reopens that.**
 `conf.d/05-logging.conf` defines `log_format mkt_access`, which omits `$remote_addr` and every other
-address variable by the same 2026-08-10 decision that took the address out of the Sentry events
-(E12-S07), and **every** `access_log` directive in the repo names it — all eight server blocks, not
+address variable by the same 2026-08-10 decision that took the address out of the Sentry events,
+and **every** `access_log` directive in the repo names it — all eight server blocks, not
 the three vhosts, because a block that declares none inherits the stock http-level one and that is
 `combined`, whose first field is the address. Adding an unnamed `access_log`, or a server block with
 none at all, is therefore a silent regression rather than a missing line, and the suite fails on both.
@@ -92,7 +92,7 @@ none at all, is therefore a silent regression rather than a missing line, and th
 ⚠️ **The same format names no `$request` and no `$http_referer` either, and both omissions are
 controls.** Four mailed links carry `:email/:hash` in the path — `/check/verify-email-user/`,
 `/check/verify-email/`, `/reset-password/` and `/x/reset/` — so the raw request line is an account
-address next to a live one-time hash (E12-S16). The request line is rebuilt from `$request_method`,
+address next to a live one-time hash. The request line is rebuilt from `$request_method`,
 `$request_uri` through a `map`, and `$server_protocol`; the referer goes through a second map, because
 `strict-origin-when-cross-origin` on the customer surface sends the full URL on same-origin requests
 and the reset page's own calls would carry the link. ⚠️ **Only two of the four have a `location` block
@@ -101,7 +101,7 @@ http level on the logged value and must stay there. Restoring `$request` for rea
 one of them back.
 
 ⚠️ **All four 443 blocks demand a client certificate, so the origin answers Cloudflare and nobody
-else.** `snippets/origin-pull.conf` (E12-S15) is included at server level four times, not three — the
+else.** `snippets/origin-pull.conf` is included at server level four times, not three — the
 `www` redirect is a server block of its own, and a hostname without the include goes on answering anyone
 who knows the origin address. Two consequences to hold on to: a monitoring probe or a `curl --resolve`
 aimed straight at the origin gets `400 Bad Request — No required SSL certificate was sent`, and that is
@@ -117,10 +117,10 @@ addresses there. Measured (`docs/report/log-sink-inventory.md` §6.1): severity 
 — five of five request-scoped entries at `warn` carry the prefix, none of the 162 process-lifecycle ones
 do — so **every line in a per-host error log is a line with an address in it**. The decision of
 2026-08-11 is that they stay and that lifetime is the control: 14 daily rotations, `shred` on removal,
-shipped by this repo (E12-S19) and installed **over** `/etc/logrotate.d/nginx`, because two files
+shipped by this repo and installed **over** `/etc/logrotate.d/nginx`, because two files
 globbing `/var/log/nginx/*.log` make logrotate skip one of them whole. Three things to hold on to
-before editing that file: `rotate 14` with `daily` *is* the retention and the privacy notice states it
-(E12-S25), so the two change together; `shred` needs GNU coreutils and fails open to `unlink` on a
+before editing that file: `rotate 14` with `daily` *is* the retention and the privacy notice states it,
+so the two change together; `shred` needs GNU coreutils and fails open to `unlink` on a
 busybox host, printing to cron mail and exiting 0; and the level stays `warn` in both directions, since
 `info` adds two more address-bearing classes (§6.3) and anything stricter drops the failures the file
 exists for.
@@ -142,7 +142,7 @@ exists for.
   and each half sits where it can be enforced — **per client address here**, in the zones above, and
   **per email address in `guardPublicWrite`** (`marketplace-dev-public-resource`), which is the half no
   zone can express, since a zone keyed on `$binary_remote_addr` never sees the inbox a distributed
-  source is mail-bombing. The services kept a per-address counter of their own until E12-S10 and it was
+  source is mail-bombing. The services once kept a per-address counter of their own and it was
   a fiction — `app.proxy` is off, so the address they see is this proxy's and the counter metered the
   whole platform at once. Do not add a location, and do not expect the backend to bucket callers.
 - **The suite proves configuration, never application behaviour.** All eleven upstreams are canned

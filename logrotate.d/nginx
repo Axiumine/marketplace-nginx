@@ -3,7 +3,7 @@
 # the reason it is a replacement rather than an addition.
 #
 # ---------------------------------------------------------------------------------------
-# ⚠️ THE LIFETIME OF THESE FILES IS THE ONLY CONTROL ON WHAT IS IN THEM (E12-S19).
+# ⚠️ THE LIFETIME OF THESE FILES IS THE ONLY CONTROL ON WHAT IS IN THEM.
 #
 # The access logs carry no client address — `conf.d/05-logging.conf` sees to that, and the mailed
 # `:email/:hash` links are redacted there too. The **error** logs are a different matter and cannot
@@ -23,15 +23,15 @@
 # ⚠️ **14 days, and the owner gave 14–30.** The floor is taken because the only consumer of an nginx
 # error log here is a developer reading back a recent failure, and nothing on this platform reads
 # one older than a day. Raising it to 30 is `rotate 30` on one line below, with that reason already
-# in front of whoever changes it — and it is the retention two lines of the privacy notice state
-# (E12-S25), so the page changes in the same commit or it becomes a false statement.
+# in front of whoever changes it — and it is the retention two lines of the privacy notice
+# state, so the page changes in the same commit or it becomes a false statement.
 # ---------------------------------------------------------------------------------------
 
 # ⚠️ A glob and not a list of the eight destinations. Seven are declared in this repo — three
 # `*.access.log`, three `*.error.log` and `default.access.log` from `conf.d/40-tls.conf` — and the
 # eighth is nginx's own http-level `/var/log/nginx/error.log`, which holds the start/stop lines. A
 # list would cover exactly the vhosts that existed the day it was written; the ninth destination
-# added by the next vhost would inherit the host default instead, which is the state this story
+# added by the next vhost would inherit the host default instead, which is the state this glob
 # exists to end. The container suite asserts every path the repo names is one this pattern picks up.
 /var/log/nginx/*.log {
 	# ⚠️ `rotate 14` with `daily` IS the retention. Any other period here — `weekly`, or a
