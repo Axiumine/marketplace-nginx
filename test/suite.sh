@@ -32,7 +32,7 @@ for h in $HOSTS; do
 		-subj "/CN=$h" >/dev/null 2>&1
 done
 
-# Authenticated Origin Pulls (E12-S15). `snippets/origin-pull.conf` trusts a CA by path that is
+# Authenticated Origin Pulls. `snippets/origin-pull.conf` trusts a CA by path that is
 # never committed, so the suite generates a throwaway one where the snippet expects it. Cloudflare's
 # own key is not available to a test and never will be; what is testable is the property that
 # matters — nginx refuses a caller without a certificate from that CA, and serves one with it.
@@ -412,14 +412,14 @@ probe GET marketplace-domain.com /cache-probe-b
 assert_header x-cache-status 'MISS' 'the session response was never stored (proxy_no_cache)'
 
 # The mailed-link credential. Defined once and used by two sections — the cache must never store
-# a URL carrying it (E12-S26, below) and the log must never record one (E12-S16, further down) —
+# a URL carrying it (below) and the log must never record one (further down) —
 # so the two cannot drift onto different probe values and each pass against the other's.
 LINK_EMAIL='probe@example.invalid'
 LINK_EMAIL_ENC='probe%40example.invalid'
 LINK_HASH='MKTS16LIVEONETIMEHASH0000'
 
 echo
-echo '  --- and never a URL that carries a mailed one-time credential (E12-S26) ---'
+echo '  --- and never a URL that carries a mailed one-time credential ---'
 # ⚠️ The cookie map cannot reach this case. `/reset-password/:email/:hash` has no `location` block
 # — it is an SSR route served through `location /` — and whoever follows a reset link is anonymous
 # by definition, so `$mkt_user_no_cache` is 0 for exactly the request that must never be stored.
@@ -636,7 +636,7 @@ burst_probe marketplace-domain.com           /public-authorization 24 'customer 
 # on $binary_remote_addr can express it. See the comments in 20-rate-limit.conf and the apex vhost.
 
 # --------------------------------------------------------------------------------------
-# Access logging — E12-S07. Last in the run, because its second half reloads nginx with
+# Access logging. Last in the run, because its second half reloads nginx with
 # `set_real_ip_from` pointed at the loopback, which changes the key every rate-limit zone
 # buckets on and would quietly invalidate the section above it.
 # --------------------------------------------------------------------------------------
@@ -671,7 +671,7 @@ done
 [ -z "$_missing" ] && pass 'log_format mkt_access keeps everything not derived from the network' ||
 	fail "log_format mkt_access dropped$_missing"
 
-# E12-S16 — the raw forms, and naming any one of them puts the account address and a live one-time
+# The raw forms, and naming any one of them puts the account address and a live one-time
 # hash straight back in the file. ⚠️ Matched by regex rather than by `case`, because `$request` is a
 # prefix of `$request_method` and `$request_time`, which the format legitimately names: a substring
 # test here would fail every run.
@@ -695,7 +695,7 @@ for _m in mkt_uri mkt_referer; do
 		fail "\$$_m has no map — the format names a variable nothing redacts"
 done
 
-# E12-S26 — a third map, in conf.d/30-cache.conf, matches the same four prefixes and stops the edge
+# A third map, in conf.d/30-cache.conf, matches the same four prefixes and stops the edge
 # STORING what these two stop it LOGGING. Two regexes over one list, because the redaction map needs
 # a named capture to rebuild the flow name and the cache map only needs a yes. Asserted as a literal
 # string on purpose: a fifth mailed link added to one file and not the other would otherwise be
@@ -722,7 +722,7 @@ fi
 # assert_log_clean FILE LABEL — the newest line must exist, and contain no address in any form.
 # ⚠️ The empty check is not a formality. "This address does not appear" is satisfied by a line
 # that was never written, so without it the whole section passes on a broken log path — and would
-# have passed before this story existed.
+# have passed before this check existed.
 assert_log_clean() {
 	_line=$(tail -1 "/var/log/nginx/$1")
 	if [ -z "$_line" ]; then
@@ -755,7 +755,7 @@ for h in $HOSTS; do
 done
 
 echo
-echo '  --- and no account address or one-time hash either (E12-S16) ---'
+echo '  --- and no account address or one-time hash either ---'
 
 # The four mailed links, driven as a mail client follows them. Two are the encoded form koa-utils
 # actually sends (`encodeURI` turns `@` into `%40`), two the decoded form, because a client that
@@ -826,15 +826,15 @@ assert_log_redacted marketplace-domain.com.access.log \
 	'apex  Referer from the reset page — redacted'
 
 echo
-# E12-S07 changes what is written to disk and nothing else. The forwarded address is load-bearing:
-# it is what a service would have to read if it ever needed one, and this assertion is what stops
-# the story being read as a licence to strip the headers.
+# The access-log format changes what is written to disk and nothing else. The forwarded address is
+# load-bearing: it is what a service would have to read if it ever needed one, and this assertion
+# is what stops that being read as a licence to strip the headers.
 probe POST marketplace-domain.com /public-resource -H "X-Forwarded-For: $CLIENT_IP" \
 	-H "CF-Connecting-IP: $CLIENT_IP"
 assert_body 'xri=127.0.0.1' 'X-Real-IP still reaches the upstream'
 assert_body 'xff=127.0.0.1' 'X-Forwarded-For still reaches the upstream'
 
-# E12-S09, and the same probe answers both. The upstream sees the loopback rather than the address
+# The same probe answers both. The upstream sees the loopback rather than the address
 # the request claimed, twice over: `set_real_ip_from` does not cover 127.0.0.1 on a deployed host,
 # so `CF-Connecting-IP` from an untrusted peer is ignored and `$remote_addr` stays that peer's own
 # address; and `X-Forwarded-For` is now `$remote_addr` rather than the appending form, so the
@@ -865,7 +865,7 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 	done
 
 	# ------------------------------------------------------------------------------------
-	# E12-S09 — what the zones bucket on, and which zone each endpoint spends.
+	# What the zones bucket on, and which zone each endpoint spends.
 	#
 	# Every case claims a different address out of 198.18.0.0/15, the RFC 2544 benchmarking
 	# range, which is routable nowhere. That is not cosmetic: it gives each case a bucket of
@@ -931,7 +931,7 @@ fi
 # file is the control instead, which is what the section below tests.
 
 # --------------------------------------------------------------------------------------
-# Log retention — E12-S19. Last, and after the rotation it performs nothing may read a log
+# Log retention. Last, and after the rotation it performs nothing may read a log
 # file again: the forced runs below rename and compress the very files the section above
 # asserts on.
 # --------------------------------------------------------------------------------------
@@ -994,9 +994,9 @@ case "$_pattern" in
 	*)  fail "retention is not 14 daily rotations — logrotate read: $_pattern" ;;
 esac
 
-# The rest of the shape. Compression, mode and owner are the story's own criteria; `su` and
-# `sharedscripts` are the two lines whose absence breaks rotation on the deployment target while
-# leaving this file looking correct.
+# The rest of the shape. Compression, mode and owner are the retention decision's own criteria;
+# `su` and `sharedscripts` are the two lines whose absence breaks rotation on the deployment target
+# while leaving this file looking correct.
 for _need in 'compress' 'shred' 'create 0640 www-data adm' 'su root adm' 'sharedscripts'; do
 	grep -qE "^[[:space:]]*$_need[[:space:]]*(#.*)?$" "$LR" &&
 		pass "logrotate.d/nginx declares '$_need'" ||
@@ -1006,7 +1006,7 @@ grep -qF 'kill -USR1' "$LR" &&
 	pass 'logrotate.d/nginx signals nginx to reopen after the rename' ||
 	fail 'no USR1 in postrotate — nginx would keep writing to the renamed inode and the new file would stay empty'
 
-# ⚠️ The error log keeps its level and its content on purpose (E12-S19): the address stays and the
+# ⚠️ The error log keeps its level and its content on purpose: the address stays and the
 # lifetime is the control. Both directions are a regression — `info` adds two more address-bearing
 # classes (finding §6.3), and anything above `warn` drops the failures these files exist for.
 _levels=$(grep -rhoE 'error_log[[:space:]]+/var/log/nginx/[^[:space:]]+[[:space:]]+[a-z]+;' \

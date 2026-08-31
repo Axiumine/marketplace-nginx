@@ -176,7 +176,7 @@ sudo nginx -t && sudo systemctl reload nginx
 ```
 
 Retention is part of the install, not an afterthought — the error logs carry a client address in every
-line and their lifetime is the only control on it (E12-S19):
+line and their lifetime is the only control on it:
 
 ```bash
 sudo cp logrotate.d/nginx /etc/logrotate.d/nginx      # over the packaged one, deliberately
@@ -206,7 +206,7 @@ sudo certbot certonly --webroot -w /var/www/acme -d admin.marketplace-domain.com
 
 ## Authenticated Origin Pulls — making the origin accept Cloudflare only
 
-**Configured here, not yet switched on at Cloudflare** (E12-S15). `snippets/origin-pull.conf` is in the
+**Configured here, not yet switched on at Cloudflare.** `snippets/origin-pull.conf` is in the
 repo and included by all four 443 blocks, and the suite asserts both directions against a throwaway CA
 it generates itself. What is *not* done is step 2 below — the Cloudflare side — and until it is, this
 configuration must not reach the host: nginx would demand a client certificate that nothing is
@@ -486,7 +486,7 @@ knowing; neither is visible to `nginx -t` and neither is visible by reading the 
    than built: the Turnstile secret is already server-side in `marketplace-dev-public-resource` and always
    was, and registration is already limited there by `guardPublicWrite` — one Redis counter per hour *per
    email address*, which no `$binary_remote_addr` zone can express (the per-address half is this repo's,
-   and the service's own copy of it was removed by E12-S10 as a counter that metered nothing but nginx).
+   and the service's own copy of it was removed as a counter that metered nothing but nginx).
    Building the
    route would have pushed plaintext passwords through a second process to weaken both controls. The apex
    vhost and `conf.d/20-rate-limit.conf` each carry the reasoning where the block used to be.
@@ -577,7 +577,7 @@ the full request URI, so a mailed `/reset-password/:email/:hash` link becomes a 
 kept up to `inactive=24h`, which is the lifetime, not the 60s of `proxy_cache_valid`, and in a directory
 nothing rotates and nothing shreds. ⚠️ **The cookie map cannot catch it**: that route has no `location`
 block of its own and whoever follows a reset link is anonymous by definition, so `$mkt_user_no_cache` is 0
-for exactly the request that must not be stored. `$mkt_credential_uri` (E12-S26) is the URL test beside
+for exactly the request that must not be stored. `$mkt_credential_uri` is the URL test beside
 it, matching the same four prefixes `conf.d/05-logging.conf` redacts — the log and the cache have to agree
 about which links carry a credential, and the suite fails if the two lists drift.
 
@@ -642,8 +642,8 @@ prefix into every error entry and exposes no format for it — only the destinat
 access-log format is not a property of the edge as a whole. Measured, at the `warn` all three vhosts
 ship, five of five request-scoped entries carry that prefix and the 162 process-lifecycle entries carry
 none — so every line in a per-host error log is a line with an address in it. That is decided rather
-than pending: the address stays, and `logrotate.d/nginx` makes the file's lifetime the control instead
-(E12-S19). Changing the level breaks the decision in both directions — `info` adds two more
+than pending: the address stays, and `logrotate.d/nginx` makes the file's lifetime the control instead.
+Changing the level breaks the decision in both directions — `info` adds two more
 address-bearing classes, and anything stricter than `warn` drops the failures the file exists for — so
 the suite asserts all three are still `warn`.
 
