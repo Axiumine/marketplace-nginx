@@ -658,10 +658,11 @@ the suite asserts all three are still `warn`.
   `graphqlUploadKoa` and both panels' upload endpoints are sized for it, but `item` carries no image
   field yet and nothing serves `UPLOAD_DIR` back to a browser. When that lands it needs a location here,
   a `Cross-Origin-Resource-Policy`, and a decision about whether the apex or a fourth host serves it.
-- **`INTROSPECTION_CODE` is still reachable wherever a service port is.** These vhosts do not bind the
-  service ports and the services bind the wildcard address; "service-to-service only" needs a firewall
-  or a bind change, neither of which is nginx's to make. §3.7c of the token audit, blocked on the
-  production-topology ADR that `ADR-INDEX.md:87` already records as owed.
+- **Every service port is reachable wherever the machine is.** These vhosts do not bind the service
+  ports and the services bind the wildcard address, so nothing here stops a caller that can route to
+  the host from talking to 4024-4032 directly. Narrowing that needs a firewall or a bind change,
+  neither of which is nginx's to make — blocked on the production-topology ADR that
+  `ADR-INDEX.md:87` already records as owed.
 - **No `__Host-` cookie prefix.** `__Host-refresh_token` would make host-only + root-path + Secure
   browser-enforced rather than configuration-enforced, but the name is set in koa-utils and read by
   `cache.conf`'s bypass map and the three SPAs. It belongs in the same koa-utils release as
