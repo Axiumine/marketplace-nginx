@@ -876,6 +876,10 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 	A_ROT=198.18.0.11
 	A_LOGIN=198.18.0.22
 	A_OTHER=198.18.0.33
+	A_OWNER_ROT=198.18.0.44
+	A_OWNER_LOGIN=198.18.0.55
+	A_ADMIN_ROT=198.18.0.66
+	A_ADMIN_LOGIN=198.18.0.77
 
 	codes_as() {   # ADDRESS HOST PATH COUNT — POST COUNT times as that client, echo the codes
 		_out=''
@@ -919,6 +923,40 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 
 	assert_open "$A_OTHER" marketplace-domain.com /public-authorization \
 		'a second client address has a budget of its own — the zones key on the claimed address'
+
+	# ------------------------------------------------------------------------------------
+	# The same pair of assertions on the two panels. RISK_REGISTER R52.
+	#
+	# `conf.d/20-rate-limit.conf` splits login from rotation three times over, once per
+	# hostname, for one reason: rotation is a timer-driven path every open session walks, so a
+	# flood of it against a login-sized ceiling holds a whole office address down with no
+	# attacker present. That reasoning is identical on all three hostnames, and until this block
+	# existed only the customer surface's pair was ever executed — the panels' four zones were
+	# declared, attached, and proved by the argument alone.
+	#
+	# Four addresses rather than two, because an address that has already spent one zone's
+	# burst cannot then show that the *other* zone was left alone: the second half of each pair
+	# has to arrive with a full budget on both.
+	# ------------------------------------------------------------------------------------
+	assert_exhausted "$A_OWNER_ROT" shopowner.marketplace-domain.com /authenticated-authorization \
+		'owner rotation flood (mkt_owner_refresh 10r/m b20)'
+	assert_open "$A_OWNER_ROT" shopowner.marketplace-domain.com /public-authorization \
+		'the same address can still sign in to the panel — owner rotation does not spend mkt_owner_auth'
+
+	assert_exhausted "$A_OWNER_LOGIN" shopowner.marketplace-domain.com /public-authorization \
+		'owner login flood    (mkt_owner_auth 1r/m b20)'
+	assert_open "$A_OWNER_LOGIN" shopowner.marketplace-domain.com /authenticated-authorization \
+		'the same address can still rotate — owner login does not spend mkt_owner_refresh'
+
+	assert_exhausted "$A_ADMIN_ROT" admin.marketplace-domain.com /admin-authenticated-authorization \
+		'admin rotation flood (mkt_admin_refresh 10r/m b20)'
+	assert_open "$A_ADMIN_ROT" admin.marketplace-domain.com /public-authorization \
+		'the same address can still sign in to the panel — admin rotation does not spend mkt_admin_auth'
+
+	assert_exhausted "$A_ADMIN_LOGIN" admin.marketplace-domain.com /public-authorization \
+		'admin login flood    (mkt_admin_auth 1r/m b20)'
+	assert_open "$A_ADMIN_LOGIN" admin.marketplace-domain.com /admin-authenticated-authorization \
+		'the same address can still rotate — admin login does not spend mkt_admin_refresh'
 else
 	fail 'the real_ip overlay broke the configuration'
 	sed 's/^/        /' /tmp/nginx-t3.out
