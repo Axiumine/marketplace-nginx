@@ -131,6 +131,14 @@ SECRET_PATH='(^|/)(\.env(\..*)?|\.netrc|id_rsa|id_dsa|id_ecdsa|id_ed25519)$|\.(p
 # caught by SECRET_PATH above; this catches a key pasted inline instead.
 SECRET_VALUE='-----BEGIN [A-Z ]*PRIVATE KEY-----'
 SECRET_VALUE+='|mongodb(\+srv)?://[^:/[:space:]]+:[^@[:space:]]{10,}@'
+# A credential handed to a command line as a flag - `mongosh … -password <the value>`,
+# `mysql --password=…`. No rule above can see one: there is no `KEY=` at the start of the line, no
+# quoted assignment and no URI, which is exactly the shape RISK_REGISTER R14 was opened for. Three
+# things keep it from firing on prose: the flag has to open its own word, so `reset-password material`
+# in a comment is not a match; the value may not start with `$`, `x` or `<`, the three placeholder
+# shapes written in these repos; and it must run 12 characters or more. Costs 0 false positives
+# against every tracked file in all sixteen repos, measured before it landed.
+SECRET_VALUE+='|(^|[[:space:]])-{1,2}(password|passwd|pwd|pass)[[:space:]=]+["'"'"']?[^$x<"'"'"'[:space:]][^[:space:]"'"'"']{11,}'
 # credential URL: `https://<userinfo>@host` — the shape of a Sentry/Bugsink DSN and of a
 # tokenised registry URL. What separates a real one from a placeholder is the userinfo: the
 # placeholder is 14 `x`, a real key is 32+ hex. Hence first-char-not-x plus a 20-char floor.
