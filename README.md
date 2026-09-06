@@ -384,6 +384,38 @@ One consequence worth writing down for whoever operates this: **an uptime probe 
 straight at the origin will fail by design** once this is on. Point monitoring at the Cloudflare
 hostname, or give the probe a client certificate of its own signed by the same CA.
 
+#### Noticing before the day arrives
+
+```bash
+./marketplace-nginx/scripts/check-origin-pull-cert-expiry.sh --file /etc/nginx/certs/origin-pull-ca.pem
+./marketplace-nginx/scripts/check-origin-pull-cert-expiry.sh --file /path/to/cloudflare-client.pem --warn-days 30
+```
+
+Exit `0` the certificate outlives the window (default 60 days), `1` it does not, `2` the path is not a
+certificate this host can read — three answers rather than two, because a timer that reports "fine" for a
+path that moved is worse than no timer. It prints the subject and the `notAfter` date and nothing else;
+it never reads a private key.
+
+⚠️ **It detects. It does not renew.** Renewal is steps 1 and 2 above, run by a human with Cloudflare API
+credentials this repo does not hold, and this script is a second layer beside the calendar entry in R44 —
+never a replacement for recording the real issuance date the day step 1 is run.
+
+⚠️ **Two certificates expire on this connection and only one of them lives on this host.**
+`origin-pull-ca.pem` is the CA nginx verifies against, and when it lapses every Cloudflare client
+certificate stops verifying — the same outage, from the other end. `cloudflare-client.pem` is uploaded to
+Cloudflare rather than served from here, so point the script at the copy you retained, or it is checked by
+nobody. Give both their own timer:
+
+```
+# /etc/systemd/system/origin-pull-expiry.service — Type=oneshot, OnFailure= an alert unit
+ExecStart=/opt/marketplace-nginx/scripts/check-origin-pull-cert-expiry.sh --file /etc/nginx/certs/origin-pull-ca.pem
+ExecStart=/opt/marketplace-nginx/scripts/check-origin-pull-cert-expiry.sh --file /etc/nginx/certs/cloudflare-client.pem
+```
+
+Daily is enough — the window is measured in weeks. A `cron` line works as well; what matters is that a
+non-zero exit reaches a person, since a check whose failure goes to a log nobody reads is the state this
+replaces.
+
 ## Testing it, before it reaches a host
 
 ```bash
