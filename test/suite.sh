@@ -570,6 +570,69 @@ tr -d '\r' <"$HDR".raw >"$HDR"
 [ "$(status)" = 200 ] && pass 'ACME on :80 still completes with no client certificate' ||
 	fail "ACME on :80 → $(status) with no client certificate; certbot renewal would fail"
 
+# ------------------------------------------------------------------------------------
+# The expiry check. RISK_REGISTER R44.
+#
+# Nothing renews the origin-pull material, and until this script existed nothing noticed it
+# either — the first symptom was four 443 blocks refusing Cloudflare. The script cannot renew and
+# does not pretend to; what it must do is tell the three cases apart, because a timer that reports
+# "fine" for a path that moved is worse than no timer at all.
+#
+# Two throwaway certificates, minted here rather than reusing the ones above: those are all
+# `-days 1`, which is the WARN case only. A check proved in one direction cannot tell a working
+# threshold from one that always warns.
+# ------------------------------------------------------------------------------------
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj '/CN=origin pull long lived' \
+	-keyout /tmp/op-long.priv -out /tmp/op-long.crt >/dev/null 2>&1
+openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj '/CN=origin pull about to lapse' \
+	-keyout /tmp/op-short.priv -out /tmp/op-short.crt >/dev/null 2>&1
+
+check_expiry() {   # ARGS… — echo the exit status, never abort the suite under `set -e`
+	_rc=0
+	sh /src/scripts/check-origin-pull-cert-expiry.sh "$@" >/tmp/op-check.out 2>&1 || _rc=$?
+	echo "$_rc"
+}
+
+[ "$(check_expiry --file /tmp/op-long.crt --warn-days 60)" = 0 ] &&
+	pass 'expiry check: a certificate outliving the window exits 0' ||
+	fail 'expiry check: a long-lived certificate was not reported as OK'
+
+grep -q '^OK ' /tmp/op-check.out && pass 'expiry check: the OK line names the file and its notAfter' ||
+	fail 'expiry check: nothing printed an OK line'
+
+[ "$(check_expiry --file /tmp/op-short.crt --warn-days 60)" = 1 ] &&
+	pass 'expiry check: a certificate inside the window exits 1' ||
+	fail 'expiry check: a certificate expiring tomorrow was reported as fine at --warn-days 60'
+
+grep -q '^WARN ' /tmp/op-check.out && pass 'expiry check: the WARN line points at the renewal procedure' ||
+	fail 'expiry check: nothing printed a WARN line'
+
+# ⚠️ The threshold is a threshold, not a constant `WARN`. The same certificate that warns at 60
+# days must pass at 0 — otherwise the script reports an outage every day of its life and is
+# switched off long before the real one.
+[ "$(check_expiry --file /tmp/op-short.crt --warn-days 0)" = 0 ] &&
+	pass 'expiry check: --warn-days is honoured, not ignored' ||
+	fail 'expiry check: the same certificate warns at every window — the threshold is not read'
+
+[ "$(check_expiry --file /tmp/does-not-exist.crt)" = 2 ] &&
+	pass 'expiry check: a path that is not there exits 2, not 0 and not 1' ||
+	fail 'expiry check: a missing file was not reported as unusable'
+
+# ⚠️ `openssl x509 -checkend` exits 1 on a file that is not a certificate at all, which is the same
+# status as "expiring". Without the parse in front of it, pointing the timer at the wrong file
+# beside the certificate reads as a certificate about to lapse — a warning that renewing never
+# clears.
+[ "$(check_expiry --file /src/README.md)" = 2 ] &&
+	pass 'expiry check: a file that is not a certificate exits 2, not 1' ||
+	fail 'expiry check: a non-certificate was reported as expiring rather than as unusable'
+
+[ "$(check_expiry --file /tmp/op-long.crt --warn-days sixty)" = 2 ] &&
+	pass 'expiry check: a non-numeric window is refused' ||
+	fail 'expiry check: --warn-days sixty was accepted'
+
+[ "$(check_expiry)" = 2 ] && pass 'expiry check: no --file is a usage error' ||
+	fail 'expiry check: it ran with no certificate to check'
+
 echo
 echo '==================================================================='
 echo ' Panel hardening'
