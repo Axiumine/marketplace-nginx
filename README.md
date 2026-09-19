@@ -1,5 +1,13 @@
 # nginx — the platform edge
 
+> [!WARNING]
+> **Work in progress — this software is not tested yet.** It has never run outside a developer
+> workstation: no real deployment, no load test, no security review, no upgrade path. Parts of the
+> platform are deliberately unbuilt, and anything here — schemas, endpoints, configuration, file
+> layout — can still change without notice. Whatever automated gates this repo runs, treat the result
+> as unproven: do not point it at real users or real data.
+> Read [`docs/PRODUCTION_HARDENING.md`](https://github.com/Axiumine/fullstack-marketplace-blueprint/blob/main/docs/PRODUCTION_HARDENING.md) before taking any of it further.
+
 The production edge for all three domains, in one place. **This repo is authoritative.**
 `marketplace-user/docs/nginx/` held the customer vhost alone and is now a pointer at this folder — its
 four `.conf` files are deleted, not copied, so there is one edge configuration and not two. The two
