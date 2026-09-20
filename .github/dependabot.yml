@@ -1,0 +1,37 @@
+# Dependabot — what raises Scorecard's Dependency-Update-Tool check, and nothing more.
+#
+# ⚠️ READ THIS BEFORE MERGING ANY DEPENDABOT PULL REQUEST.
+# Both gates this repo has — test/run.sh and the scorecard floor — live in .githooks/,
+# wired by `core.hooksPath`, which is git config local to a real clone. Dependabot never
+# clones locally, and a merge from the GitHub UI is a server-side operation with no local
+# git process in the path. So a Dependabot PR merged from the browser has passed NOTHING.
+#
+# The procedure is therefore not optional: fetch the branch, check it out, and let
+# pre-push run for real. Merge only after it passes. ADR-054 records why there is no CI
+# reproducing those gates.
+#
+# ⚠️ Only the github-actions ecosystem is listed, and that is the whole truth of this
+# repo's dependencies as a bot can see them. There is no package.json here at all. The
+# one version that matters — the nginx image the suite runs against — is a shell string
+# inside test/run.sh, which no Dependabot ecosystem can read, so it stays a hand-bump.
+#
+# ⚠️ YAML forbids tabs — see the note in .github/workflows/scorecard.yml.
+version: 2
+updates:
+  - package-ecosystem: 'github-actions'
+    directory: '/'
+    schedule:
+      interval: 'weekly'
+      day: 'saturday'
+      time: '03:30'
+      timezone: 'Etc/UTC'
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci'
+      include: 'scope'
+    labels:
+      - 'dependencies'
+    groups:
+      actions:
+        patterns:
+          - '*'
