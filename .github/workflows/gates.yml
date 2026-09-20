@@ -1,0 +1,48 @@
+# This repository's own gate, run on GitHub — the second caller of the suite
+# .githooks/pre-push runs locally (ADR-055).
+#
+# ⚠️ This workflow exists for one path only: a pull request merged in the browser.
+# Every other gate on this platform is a local git hook, and a merge performed on
+# github.com runs no hook at all — so before this file, a Dependabot pull request
+# merged with the green button reached main having passed nothing (RISK_REGISTER R63).
+# `required_status_checks` on main names the `gates` job below, which is why the job
+# id must not be renamed: the branch protection rule on all sixteen repositories
+# refers to it by that exact string.
+#
+# ⚠️ YAML forbids tabs. The workspace-wide "indentation is tabs" rule is enforced by
+# eslint and prettier over JavaScript and TypeScript — it cannot apply here.
+#
+# ⚠️ Every `uses:` is pinned to a commit SHA, not a tag: Scorecard's
+# Pinned-Dependencies check grades this file too, and a tag is mutable.
+#
+# One gate, because this repository has one: it carries no package.json, so there is
+# no lint, no type check, no coverage, no mutation score and no Qodana project here.
+# test/run.sh is `nginx -t` against the real files plus the behavioural half — a live
+# nginx, stand-in backends, and assertions against what comes out of the socket. It
+# needs nothing but a container engine, which the runner has.
+#
+# scorecard is not repeated here: it has its own workflow (scorecard.yml) and grades
+# the repository rather than a diff.
+name: Gates
+
+on:
+  pull_request:
+  push:
+    branches: ['main']
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Gate 1 - edge configuration suite (test/run.sh)
+        run: ./test/run.sh
