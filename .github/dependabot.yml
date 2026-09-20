@@ -1,14 +1,16 @@
 # Dependabot — what raises Scorecard's Dependency-Update-Tool check, and nothing more.
 #
-# ⚠️ READ THIS BEFORE MERGING ANY DEPENDABOT PULL REQUEST.
-# Both gates this repo has — test/run.sh and the scorecard floor — live in .githooks/,
-# wired by `core.hooksPath`, which is git config local to a real clone. Dependabot never
-# clones locally, and a merge from the GitHub UI is a server-side operation with no local
-# git process in the path. So a Dependabot PR merged from the browser has passed NOTHING.
+# ⚠️ READ THIS BEFORE MERGING ANY DEPENDABOT PULL REQUEST — GREEN IS NOT ENOUGH.
+# One of the two gates this repo has runs on the pull request itself since ADR-055:
+# .github/workflows/gates.yml runs test/run.sh — `nginx -t` plus the behavioural suite in
+# a throwaway container — and `main` requires its `gates` check, so the browser merge no
+# longer passes nothing, which is what it passed under ADR-054. The other does not run
+# there: the Scorecard floor has its own workflow and grades the repository's state on
+# GitHub rather than a diff.
 #
-# The procedure is therefore not optional: fetch the branch, check it out, and let
-# pre-push run for real. Merge only after it passes. ADR-054 records why there is no CI
-# reproducing those gates.
+# The procedure is therefore still not optional: fetch the branch, check it out, and let
+# pre-push run for real. Merge only after it passes. The hooks are the authoritative
+# layer; the green check is the second one.
 #
 # ⚠️ Only the github-actions ecosystem is listed, and that is the whole truth of this
 # repo's dependencies as a bot can see them. There is no package.json here at all. The
