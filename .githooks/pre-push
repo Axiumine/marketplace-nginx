@@ -8,13 +8,16 @@
 # installed on this machine, so a broken vhost stays invisible until a reload
 # fails on a host where a failed reload is an outage.
 #
-# One blocking gate:
-#   [1/1] test/run.sh — `nginx -t` against the real files with throwaway
+# Two blocking gates:
+#   [1/2] test/run.sh — `nginx -t` against the real files with throwaway
 #         certificates, then the behavioural half: a live nginx, stand-in
 #         backends, and assertions against what actually comes out of the
 #         socket. The second half is the one that caught a
 #         Content-Security-Policy header being silently dropped while
 #         `nginx -t` stayed perfectly happy.
+#   [2/2] scorecard — OpenSSF supply-chain posture of this repo as GitHub holds it,
+#         floored in .scorecard-floor. The only gate here that asks the network a
+#         question, and so the only one with a bypass — see its own header.
 #
 # ⚠️ Not scoped by path, deliberately, and there is nothing here to scope it by:
 # every file in this repo is part of the one configuration the suite exercises.
@@ -117,7 +120,7 @@ if ! "$ENGINE" image inspect "$IMAGE" > /dev/null 2>&1; then
 		"$ENGINE pull $IMAGE"
 fi
 
-echo "pre-push [1/1]: marketplace-nginx — validating and testing the edge configuration against $IMAGE…"
+echo "pre-push [1/2]: marketplace-nginx — validating and testing the edge configuration against $IMAGE…"
 
 if ! "$RUNNER"; then
 	cat >&2 << 'MSG'
@@ -163,5 +166,256 @@ MSG
 	exit 1
 fi
 
-echo 'pre-push [1/1]: edge configuration validated and all checks passed. Pushing.'
+echo 'pre-push [1/2]: edge configuration validated and all checks passed.'
+
+# ---------------------------------------------------------------------------
+# Gate 2 — OpenSSF Scorecard (supply-chain posture). The gate above this one reads
+# the working tree: test/run.sh puts the configuration in this checkout through a
+# real nginx. This one does not.
+#
+# ⚠️ The scorecard CLI in --repo mode asks the GitHub API about this repository as
+# GitHub knows it right now. It cannot see the commits being pushed, and there is
+# no flag that makes it. So this gate certifies the repository's posture a few
+# seconds ago on the forge — branch protection, whether a security policy exists,
+# whether the workflows are pinned — and never the diff. It is last for that
+# reason: read the honest gates' verdicts first.
+#
+# ⚠️ The CLI exits 0 whatever the score is. There is no --threshold, --fail-on or
+# --min-score flag in any version; a non-zero exit means the scan itself could not
+# run. The pass/fail decision below is ours, made from the JSON, and `$?` is never
+# trusted for it.
+#
+# The floor lives in .scorecard-floor, committed, one `Name=value` line per check
+# plus `aggregate=`. It is set to what the repository actually scored the day this
+# gate landed, so it can only ever ratchet upwards — the same rule the coverage and
+# mutation thresholds follow. Raising a number there is a normal commit. Lowering
+# one is the thing this gate exists to prevent: if a check drops, the fix is the
+# control that regressed, not the floor.
+#
+# Per-check lines and not just the aggregate: a repository can hold its aggregate
+# while Branch-Protection silently falls to 0, because some unrelated check rose
+# by as much. The aggregate alone would pass that push.
+#
+# Needs a token (the GitHub API answers 60/hr unauthenticated and the scan will
+# not finish) and needs the network. It reads GITHUB_AUTH_TOKEN, then
+# SCORECARD_TOKEN, then falls back to `gh auth token`. The value is passed into the
+# container through the environment and is never printed, logged or written to a
+# file.
+#
+# Bypass: `SKIP_SCORECARD=1 git push` — for a Docker, network or GitHub outage,
+# never for a finding.
+# ---------------------------------------------------------------------------
+
+if [ -n "${SKIP_SCORECARD:-}" ]; then
+	echo 'pre-push [2/2]: supply-chain posture gate skipped — SKIP_SCORECARD is set.' >&2
+else
+	# Same contract as every gate above: a missing prerequisite blocks. A gate that
+	# steps aside when it cannot run is not a gate.
+	scorecard_block() {
+		local reason="$1"
+		shift
+		{
+			echo
+			echo '────────────────────────────────────────────────────────────────────────────'
+			echo "PUSH BLOCKED — $reason"
+			echo
+			echo 'Fix it with:'
+			echo
+			printf '    %s\n' "$@"
+			echo
+			echo 'Bypass once (every other gate still runs): SKIP_SCORECARD=1 git push'
+			echo '────────────────────────────────────────────────────────────────────────────'
+		} >&2
+		exit 1
+	}
+
+	# Pinned by digest, not by tag. The tag is what upstream moves; the digest is what
+	# was actually read. Both forms are given so `docker pull` in a fix line is
+	# copy-pasteable.
+	SCORECARD_IMAGE='ghcr.io/ossf/scorecard:v5.5.0@sha256:3f24714e9366917adb7a05635382c97dfecb14b21eaef3dfa2ea48c8e23e0795'
+	SCORECARD_IMAGE_TAG='ghcr.io/ossf/scorecard:v5.5.0'
+	SCORECARD_FLOOR_FILE="$ROOT/.scorecard-floor"
+
+	# ⚠️ gcr.io/openssf/scorecard, which most published examples still name, is dead:
+	# the project's billing is disabled and it answers 403. ghcr.io is the live home.
+
+	[ -f "$SCORECARD_FLOOR_FILE" ] ||
+		scorecard_block "$SCORECARD_FLOOR_FILE is missing — with no floor there is nothing to compare against and every score would pass." \
+			"git checkout $SCORECARD_FLOOR_FILE"
+
+	# Checked here rather than discovered after the scan: a missing interpreter would
+	# otherwise cost a container run and an API call before failing.
+	command -v python3 > /dev/null 2>&1 ||
+		scorecard_block 'python3 not found in PATH — the floor comparison below is written in it.' \
+			'sudo apt install python3'
+
+	command -v docker > /dev/null 2>&1 ||
+		scorecard_block 'docker not found in PATH — the scan runs inside the pinned scorecard container.' \
+			'# install Docker Engine, then push again:' \
+			'https://docs.docker.com/engine/install/'
+
+	docker info > /dev/null 2>&1 ||
+		scorecard_block 'docker daemon not reachable.' \
+			'sudo systemctl start docker'
+
+	docker image inspect "$SCORECARD_IMAGE" > /dev/null 2>&1 ||
+		scorecard_block "scorecard image $SCORECARD_IMAGE is not present locally." \
+			"docker pull $SCORECARD_IMAGE_TAG"
+
+	# github.com/OWNER/REPO, from whatever form origin is written in — ssh, https, with
+	# or without the .git suffix.
+	SCORECARD_ORIGIN="$(git remote get-url origin 2> /dev/null || true)"
+	SCORECARD_SLUG="$(printf '%s' "$SCORECARD_ORIGIN" | sed -E 's#^git@github\.com:#github.com/#; s#^(https?|ssh)://([^@]*@)?github\.com/#github.com/#; s#\.git$##')"
+	case "$SCORECARD_SLUG" in
+		github.com/*/*) ;;
+		*) scorecard_block "origin does not look like a GitHub repository — scorecard has nothing to score. origin reads: ${SCORECARD_ORIGIN:-<unset>}" \
+			'git remote set-url origin https://github.com/<owner>/<repo>.git' ;;
+	esac
+
+	# Never echoed, never written to disk. `gh auth token` is the last resort so that a
+	# shell that already exports one is not overridden.
+	SCORECARD_TOKEN_VALUE="${GITHUB_AUTH_TOKEN:-${SCORECARD_TOKEN:-}}"
+	if [ -z "$SCORECARD_TOKEN_VALUE" ]; then
+		SCORECARD_TOKEN_VALUE="$(gh auth token 2> /dev/null || true)"
+	fi
+	[ -n "$SCORECARD_TOKEN_VALUE" ] ||
+		scorecard_block 'no GitHub token available — unauthenticated the API allows 60 requests an hour and the scan cannot finish.' \
+			'gh auth login' \
+			'# or, for one push:  GITHUB_AUTH_TOKEN=<token> git push'
+
+	echo "pre-push [2/2]: checking supply-chain posture of $SCORECARD_SLUG ($SCORECARD_IMAGE_TAG)…"
+
+	SCORECARD_JSON="$(mktemp)"
+	if ! GITHUB_AUTH_TOKEN="$SCORECARD_TOKEN_VALUE" docker run --rm \
+		-e GITHUB_AUTH_TOKEN \
+		"$SCORECARD_IMAGE" \
+		--repo="$SCORECARD_SLUG" \
+		--format=json \
+		> "$SCORECARD_JSON" 2> /dev/null; then
+		rm -f "$SCORECARD_JSON"
+		scorecard_block 'the scorecard scan could not run — the network, the GitHub API or the token is the usual cause. A scan that did not run is not a clean scan.' \
+			'gh auth status' \
+			'# then push again, or bypass this one gate during an outage:' \
+			'SKIP_SCORECARD=1 git push'
+	fi
+	unset SCORECARD_TOKEN_VALUE
+
+	# The floor comparison, inline. python3, because marketplace-nginx ships no JavaScript and so has no node to lean on.
+	# Column 0 for the heredoc body on purpose: <<- strips every leading tab, which
+	# would flatten the script's own indentation on its way to the interpreter.
+	#
+	# Exit 0 = at or above the floor. 3 = below it. Anything else means the comparison
+	# itself broke, which says nothing at all about the score — reported as its own
+	# failure below rather than dressed up as a finding.
+	SCORECARD_VERDICT=0
+	SC_JSON="$SCORECARD_JSON" SC_FLOOR="$SCORECARD_FLOOR_FILE" python3 <<'EVAL' || SCORECARD_VERDICT=$?
+import json, os, re, sys
+
+with open(os.environ["SC_JSON"], encoding="utf-8") as handle:
+	report = json.load(handle)
+
+floor = {}
+floor_aggregate = None
+with open(os.environ["SC_FLOOR"], encoding="utf-8") as handle:
+	for raw_line in handle:
+		line = re.sub(r"#.*$", "", raw_line).strip()
+		name, _, raw_value = line.partition("=")
+		name = name.strip()
+		if not name or not raw_value:
+			continue
+		try:
+			value = float(raw_value.strip())
+		except ValueError:
+			continue
+		if name == "aggregate":
+			floor_aggregate = value
+		else:
+			floor[name] = value
+
+checks = report.get("checks") or []
+actual = {c["name"]: c["score"] for c in checks}
+reasons = {c["name"]: (c.get("reason") or "").split("\n")[0] for c in checks}
+
+fell, rose, unfloored = [], [], []
+if floor_aggregate is None:
+	fell.append(("aggregate", "none", report["score"], "no aggregate= line in the floor file"))
+elif report["score"] < floor_aggregate:
+	fell.append(("aggregate", floor_aggregate, report["score"], "weighted score of every scored check"))
+
+for name, want in floor.items():
+	if name not in actual:
+		fell.append((name, want, "absent", "the scan returned no such check — renamed upstream, or the scan was partial"))
+		continue
+	got = actual[name]
+	# -1 means the check did not apply. Going from a real score to -1 is a regression too:
+	# the control did not improve, it stopped being measurable.
+	if got < want:
+		fell.append((name, want, got, reasons.get(name, "")))
+	elif got > want:
+		rose.append((name, want, got))
+
+for name, got in actual.items():
+	if name not in floor:
+		unfloored.append((name, got))
+
+out = []
+if fell:
+	out += ["", "Below the floor:", "", "  {:<26}{:<8}{:<8}why".format("check", "floor", "now")]
+	out += ["  {:<26}{:<8}{:<8}{}".format(n, w, g, why) for n, w, g, why in fell]
+if rose:
+	out += ["", "Above the floor — raise these in .scorecard-floor to defend the new number:", ""]
+	out += ["  {:<26}{} -> {}".format(n, w, g) for n, w, g in rose]
+if unfloored:
+	out += ["", "⚠️ Scored but not in the floor file — add a line each, or a new check could sit at 0 unnoticed:", ""]
+	out += ["  {:<26}{}".format(n, g) for n, g in sorted(unfloored)]
+if out:
+	print("\n".join(out), file=sys.stderr)
+if not fell:
+	print("\n  aggregate {} >= floor {}".format(report["score"], floor_aggregate), file=sys.stderr)
+sys.exit(3 if fell else 0)
+EVAL
+
+	rm -f "$SCORECARD_JSON"
+
+	case "$SCORECARD_VERDICT" in
+		0)
+			echo 'pre-push [2/2]: supply-chain posture at or above the floor.'
+			;;
+		3)
+			cat >&2 <<'MSG'
+
+────────────────────────────────────────────────────────────────────────────
+PUSH BLOCKED — this repository's supply-chain posture on GitHub is below the
+floor recorded in .scorecard-floor. The checks that fell are listed above.
+
+⚠️ This is about the repository as GitHub holds it right now, not about the
+commits you are pushing. A check can fall here with nothing of yours having
+changed: a branch protection rule switched off, a workflow pinned to a tag that
+moved, an advisory published overnight against a dependency already in the
+lockfile.
+
+In order:
+
+  1. Read the check that fell and its reason, above. The same result with the
+     documentation for every check is at
+     https://scorecard.dev/viewer/?uri=<owner>/<repo>
+  2. Restore the control that regressed. A dependency advisory is `yarn upgrade`;
+     a workflow that came unpinned needs its SHA back; branch protection lives on
+     GitHub, not in this tree.
+  3. Raise the floor only when a check genuinely improved and you want the new
+     number defended from here on. Never to make this message go away — the floor
+     is the record of what this repository has already earned.
+────────────────────────────────────────────────────────────────────────────
+MSG
+			exit 1
+			;;
+		*)
+			scorecard_block "the floor comparison did not run (exit $SCORECARD_VERDICT) — its error is above. The score was never compared against the floor, so nothing here is cleared." \
+				'# that is a bug in this gate, not a finding in the repository' \
+				'python3 --version'
+			;;
+	esac
+fi
+
+echo 'pre-push: both gates clear. Pushing.'
 exit 0
