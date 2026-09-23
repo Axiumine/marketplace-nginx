@@ -183,6 +183,13 @@ SECRET_VALUE+='|mongodb(\+srv)?://[^:/[:space:]]+:[^@[:space:]]{10,}@'
 # shapes written in these repos; and it must run 12 characters or more. Costs 0 false positives
 # against every tracked file in all sixteen repos, measured before it landed.
 SECRET_VALUE+='|(^|[[:space:]])-{1,2}(password|passwd|pwd|pass)[[:space:]=]+["'"'"']?[^$x<"'"'"'[:space:]][^[:space:]"'"'"']{11,}'
+# redis.conf style: a `requirepass` or `masterauth` directive, which is how the Redis credential is
+# spelled since the password stopped riding in the container's argv. There is no KEY= to match on and
+# no fixed shape to the value, so the floor is a flat 15 characters, with the same first-character-not-x
+# placeholder escape the password-flag rule above uses. Plausible here the same way that rule is: a
+# redis.conf snippet pasted into a conf comment or the README, documenting the upstream's auth.
+# Anchored at the line start: `requirepass` inside a sentence or a backticked word cannot trip it.
+SECRET_VALUE+='|^[[:space:]]*(requirepass|masterauth)[[:space:]]+[^$x[:space:]][^[:space:]]{14,}'
 # credential URL: `https://<userinfo>@host` — the shape of a Sentry/Bugsink DSN and of a
 # tokenised registry URL. What separates a real one from a placeholder is the userinfo: the
 # placeholder is 14 `x`, a real key is 32+ hex. Hence first-char-not-x plus a 20-char floor.
