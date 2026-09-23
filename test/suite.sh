@@ -943,6 +943,7 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 	A_OWNER_LOGIN=198.18.0.55
 	A_ADMIN_ROT=198.18.0.66
 	A_ADMIN_LOGIN=198.18.0.77
+	A_CUST_PUBLIC=198.18.0.88
 
 	codes_as() {   # ADDRESS HOST PATH COUNT — POST COUNT times as that client, echo the codes
 		_out=''
@@ -972,6 +973,23 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 	assert_open() {   # ADDRESS HOST PATH LABEL
 		_c=$(codes_as "$1" "$2" "$3" 1)
 		case "$_c" in *200*) pass "$4" ;; *) fail "$4 — got$_c" ;; esac
+	}
+
+	# Same as assert_exhausted, but with an explicit COUNT: `mkt_public` refills at 120r/m against a
+	# burst of 40, well past the slow 1r/m and 10r/m zones the fixed 24-request version above was
+	# sized for — 24 requests would never spend it, fast enough to make the assertion below pass for
+	# the wrong reason.
+	assert_exhausted_n() {   # ADDRESS HOST PATH COUNT LABEL
+		_c=$(codes_as "$1" "$2" "$3" "$4")
+		echo "      $5:$_c"
+		case "$_c" in
+			*429*) pass "$5 — 429 once the burst is spent" ;;
+			*)     fail "$5 — no 429 in $4 requests; the zone is not limiting" ;;
+		esac
+		case "$_c" in
+			*200*) pass "$5 — the burst is let through first" ;;
+			*)     fail "$5 — nothing succeeded; the burst is too small to reach at all" ;;
+		esac
 	}
 
 	assert_exhausted "$A_ROT" marketplace-domain.com /user-authenticated-authorization \
@@ -1020,6 +1038,16 @@ if nginx -t >/tmp/nginx-t3.out 2>&1; then
 		'admin login flood    (mkt_admin_auth 1r/m b20)'
 	assert_open "$A_ADMIN_LOGIN" admin.marketplace-domain.com /admin-authenticated-authorization \
 		'the same address can still rotate — admin login does not spend mkt_admin_refresh'
+
+	# The customer surface's resource-side pair, mirroring the login-side ones above:
+	# `/user-authenticated-resource` must hold its own budget (`mkt_user_api`) rather than sharing
+	# `mkt_public` with the anonymous catalogue reads on `/public-resource`. 70 requests against a
+	# burst of 40 at 120r/m — the same generous-margin shape as the count-24-against-burst-20 pairs
+	# above, sized up because this zone refills far faster than the auth ones do.
+	assert_exhausted_n "$A_CUST_PUBLIC" marketplace-domain.com /public-resource 70 \
+		'catalogue flood (mkt_public 120r/m b40)'
+	assert_open "$A_CUST_PUBLIC" marketplace-domain.com /user-authenticated-resource \
+		'the same address can still reach the account API — anonymous browsing does not spend mkt_user_api'
 else
 	fail 'the real_ip overlay broke the configuration'
 	sed 's/^/        /' /tmp/nginx-t3.out
