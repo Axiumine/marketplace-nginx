@@ -27,7 +27,7 @@
 # ever checked before it reaches the remote.
 #
 # ⚠️ This repo has no package.json, so nothing restores `core.hooksPath` after a
-# clone. The fourteen sub-repos that are packages each carry a `prepare` script
+# clone. The fourteen sub-repos that are packages each carry a `postinstall` script
 # that does it on `yarn install`; here it is a manual
 # `git config core.hooksPath .githooks`, or this hook is off and the push is
 # ungated with no output to say so.
@@ -401,7 +401,7 @@ In order:
   1. Read the check that fell and its reason, above. The same result with the
      documentation for every check is at
      https://scorecard.dev/viewer/?uri=<owner>/<repo>
-  2. Restore the control that regressed. A dependency advisory is `yarn upgrade`;
+  2. Restore the control that regressed. A dependency advisory is `yarn up`;
      a workflow that came unpinned needs its SHA back; branch protection lives on
      GitHub, not in this tree.
   3. Raise the floor only when a check genuinely improved and you want the new
