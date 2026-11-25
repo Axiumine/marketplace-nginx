@@ -77,7 +77,7 @@ merge commit is rejected for carrying one.
 ⚠️ **`pre-push` runs `test/run.sh` and blocks on any failure**, including a missing container engine or
 test image. There is no bypass variable.
 
-⚠️ **`pre-commit`'s secret-guard patterns diverge from the other fifteen repos' copies, deliberately**
+⚠️ **`pre-commit`'s secret-guard patterns diverge from the other sixteen repos' copies, deliberately**
 (no `package.json`, no env file, no JS in this repo) — merge a fix in by hand here, never copy the file
 over wholesale.
 
