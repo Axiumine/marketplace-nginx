@@ -18,7 +18,7 @@ asymmetry [`docs/report/token-handling-security-audit.md`](https://github.com/Ax
 it.
 
 It is a repo of its own, checked out at the workspace root, because it is the one artefact that is not
-per-service: a single nginx instance fronts eleven loopback upstreams across five of the sixteen repos,
+per-service: a single nginx instance fronts eleven loopback upstreams across five of the seventeen repos,
 all three vhosts share the upstream table and the rate-limit zones, and the same `logout` service answers
 on all three hosts. Split across the service repos, no copy is ever the whole configuration.
 
@@ -26,7 +26,7 @@ on all three hosts. Split across the service repos, no copy is ever the whole co
 runs `test/run.sh` and blocks the push on the first failed check — that is the whole quality gate,
 because there is no lint, no coverage, no mutation score and no Qodana project here for anything else to
 run. `.githooks/pre-commit` is the platform's secret guard — check 0 plus the two staged-secret scans,
-byte-identical to the other fifteen repos' copies — and then exits, with no gate after it.
+byte-identical to the other sixteen repos' copies — and then exits, with no gate after it.
 
 ⚠️ **`core.hooksPath` is local config and no `prepare` script arms it here.** After a fresh clone,
 `git config core.hooksPath .githooks` — until you run it the hook is off and a push is ungated with no
@@ -89,7 +89,7 @@ over plain HTTP. Keygrip's constant-time signature stops an attacker who wants t
 does nothing against one who *reads* it in cleartext; `SameSite=Strict` constrains which sites may send
 it, not which networks may observe it. That was the 🔴 Critical of the token-handling audit, dropped from
 that report once this directory closed it — **as long as nginx is actually in front.** Nothing else on the platform sets the
-flag, nothing fails without it, and no test in any of the sixteen repos covers it.
+flag, nothing fails without it, and no test in any of the seventeen repos covers it.
 
 `secure: true` in koa-utils remains the real fix (it is the seventeenth repo, outside this workspace, so
 none of the release discipline `marketplace-common` is held to is observable from it). When it lands, this line stays: it is

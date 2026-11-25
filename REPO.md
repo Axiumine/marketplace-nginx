@@ -42,10 +42,10 @@ too** — scanning the raw file rejects good messages for what the diff contains
 `Key: value` trailers and whitespace-free lines (URLs, identifiers) are further exempt from the body
 limits.
 
-## The `pre-commit` hook — why its patterns diverge from the other fifteen repos
+## The `pre-commit` hook — why its patterns diverge from the other sixteen repos
 
 `.githooks/pre-commit` is the platform's secret guard — check 0 plus the two staged-secret scans — and
-stops there, with no gate after it. Its pattern variables diverge from the other fifteen copies',
+stops there, with no gate after it. Its pattern variables diverge from the other sixteen copies',
 deliberately, because this repo has no `package.json`, no env file and no JavaScript:
 
 - `SECRET_VALUE` keeps three branches — inline private key, MongoDB URL, credential URL. The npm,

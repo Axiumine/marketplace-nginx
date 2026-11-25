@@ -34,7 +34,7 @@
 #
 # ⚠️ This hook does not guard secrets, and does not need to: .githooks/pre-commit
 # carries check 0 and both staged-secret scans, byte-identical to the other
-# fifteen repos' copies. See ../.claude/SECRETS.md.
+# sixteen repos' copies. See ../.claude/SECRETS.md.
 #
 # No bypass variable, by design — the suite takes well under a minute and needs
 # nothing but a container engine. `git push --no-verify` is the escape hatch and
