@@ -35,7 +35,9 @@ permissions:
 jobs:
   gates:
     name: gates
-    runs-on: ubuntu-latest
+    # The organisation's own self-hosted runners, any of them (owner, 2026-11-28, ADR-061).
+    # Never a GitHub-hosted label.
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 15
     steps:
       - name: Checkout code
